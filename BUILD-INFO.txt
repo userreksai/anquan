@@ -1,0 +1,36 @@
+Anqu v0.1.0 - first implementation
+Build date: 2026-10-01 (Asia/Bangkok)
+Language: Go, standard library only
+Toolchain: go1.27.1 windows/amd64 (official archive, SHA-256 verified)
+Module minimum Go version: 1.22
+
+Validation completed on Windows/amd64:
+- go test ./... -cover: PASS
+- 14 top-level tests plus table-driven/subtests: PASS
+- internal/audit statement coverage: 83.3%
+- go vet ./...: PASS
+- CLI config validation: exit 0
+- CLI initial baseline: exit 0
+- CLI changed content: exit 2
+- CLI unchanged subsequent scan: exit 0
+- CLI missing required file: exit 2
+- CLI malformed login data: exit 1
+- CLI invalid flag: exit 1
+- CLI help: exit 0
+- Demo end-to-end run: PASS
+
+Cross-compilation completed:
+- CGO_ENABLED=0 GOOS=linux GOARCH=amd64 (GOAMD64=v1)
+- CGO_ENABLED=0 GOOS=linux GOARCH=arm64 (GOARM64=v8.0)
+- Build metadata verified for both Linux executables.
+
+Not executed here:
+- Linux runtime and Linux flock behavior
+- Reading a real target-host wtmp using util-linux last
+- systemd timer/service installation
+- node_exporter live scraping / Prometheus ingestion
+
+Linux packages contain the executable named "anqu", source code, example
+configuration, tests, demo inputs, deployment units and Chinese documentation.
+The source ZIP excludes toolchains, build caches, local baselines and generated
+reports. SHA256SUMS.txt records checksums of the three release archives.

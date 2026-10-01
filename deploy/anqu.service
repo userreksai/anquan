@@ -1,0 +1,13 @@
+[Unit]
+Description=Anqu file and login audit
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=root
+UMask=0022
+ExecStart=/usr/local/anqu/anqu -config /usr/local/anqu/config.json
+# 2 means collection succeeded but changes/missing files were found.
+SuccessExitStatus=2
+NoNewPrivileges=true
+PrivateTmp=true

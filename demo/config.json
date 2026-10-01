@@ -1,0 +1,24 @@
+{
+  "output_dir": "output",
+  "state_file": "state/md5.json",
+  "timezone": "Asia/Shanghai",
+  "md5": {
+    "enabled": true,
+    "paths": ["watched"],
+    "recursive": true,
+    "exclude_paths": []
+  },
+  "login": {
+    "enabled": true,
+    "source": "jsonl",
+    "path": "login.jsonl",
+    "last_command": "last",
+    "timeout_seconds": 10,
+    "max_records": 1000
+  },
+  "existence": {
+    "enabled": true,
+    "list_file": "files.json",
+    "base_dir": "watched"
+  }
+}

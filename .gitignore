@@ -1,0 +1,5 @@
+.tools/
+.cache/
+dist/
+demo/output/
+*.exe

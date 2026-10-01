@@ -1,0 +1,10 @@
+[Unit]
+Description=Collect Anqu security audit every five minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=5min
+Unit=anqu.service
+
+[Install]
+WantedBy=timers.target
