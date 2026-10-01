@@ -10,8 +10,8 @@ import (
 
 func main() {
 	flags := flag.NewFlagSet("anqu", flag.ContinueOnError)
-	configPath := flags.String("config", "/usr/local/anqu/config.json", "JSON configuration file")
-	check := flags.Bool("check-config", false, "validate configuration and existence list without collecting")
+	configPath := flags.String("config", "/usr/local/anqu/config.yaml", "YAML configuration file (.yaml/.yml; legacy .json also supported)")
+	check := flags.Bool("check-config", false, "validate configuration and file checks without collecting")
 	if err := flags.Parse(os.Args[1:]); err != nil {
 		if err == flag.ErrHelp {
 			return

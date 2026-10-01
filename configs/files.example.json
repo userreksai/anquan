@@ -1,6 +1,0 @@
-[
-  { "path": "ssh/sshd_config", "type": "file" },
-  { "path": "passwd", "type": "file" },
-  { "path": "ssh", "type": "directory" },
-  { "path": "/etc/crontab", "type": "file" }
-]

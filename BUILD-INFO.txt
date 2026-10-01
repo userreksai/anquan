@@ -1,23 +1,25 @@
-Anqu v0.1.0 - first implementation
+Anqu v0.2.0 - unified YAML configuration
 Build date: 2026-10-01 (Asia/Bangkok)
-Language: Go, standard library only
+Language: Go
+Runtime dependency: go.yaml.in/yaml/v3 v3.0.4
 Toolchain: go1.27.1 windows/amd64 (official archive, SHA-256 verified)
 Module minimum Go version: 1.22
 
 Validation completed on Windows/amd64:
 - go test ./... -cover: PASS
-- 14 top-level tests plus table-driven/subtests: PASS
-- internal/audit statement coverage: 83.3%
+- 19 top-level tests plus table-driven/subtests: PASS
+- internal/audit statement coverage: 83.8%
 - go vet ./...: PASS
-- CLI config validation: exit 0
-- CLI initial baseline: exit 0
-- CLI changed content: exit 2
-- CLI unchanged subsequent scan: exit 0
-- CLI missing required file: exit 2
+- CLI YAML example/config validation: exit 0
+- CLI standalone YAML initial baseline: exit 0
+- CLI YAML changed content: exit 2
+- CLI legacy JSON reuses the YAML baseline: exit 0
+- CLI inline missing required file: exit 2
+- CLI duplicate YAML key: exit 1
 - CLI malformed login data: exit 1
-- CLI invalid flag: exit 1
-- CLI help: exit 0
-- Demo end-to-end run: PASS
+- CLI help/default YAML configuration path: PASS
+- YAML comments, .yaml/.yml, defaults, path types and strict validation: PASS
+- JSON-to-YAML migration preserves MD5 baseline and observed changes: PASS
 
 Cross-compilation completed:
 - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 (GOAMD64=v1)
@@ -31,6 +33,6 @@ Not executed here:
 - node_exporter live scraping / Prometheus ingestion
 
 Linux packages contain the executable named "anqu", source code, example
-configuration, tests, demo inputs, deployment units and Chinese documentation.
+YAML configuration, tests, demo inputs, deployment units and Chinese documentation.
 The source ZIP excludes toolchains, build caches, local baselines and generated
 reports. SHA256SUMS.txt records checksums of the three release archives.

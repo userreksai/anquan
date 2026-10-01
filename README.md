@@ -1,8 +1,8 @@
-# Anqu：文件与登录巡检（Go 第一版）
+# Anqu：文件与登录巡检（v0.2.0）
 
 按配置执行一次巡检：计算文件 MD5 并记录变化、读取最近一条登录记录、检查清单中的文件或目录。每次生成 JSON 汇总和 Prometheus / node_exporter Textfile Collector 格式的 `.prom` 文件。
 
-完整需求及功能边界见 [需求与实现说明](docs/需求与实现说明.md)。目标运行环境为 Linux；程序使用 Go 标准库，无第三方 Go 依赖。
+完整需求及功能边界见 [需求与实现说明](docs/需求与实现说明.md)。目标运行环境为 Linux。所有设置及文件检查清单合并在一个 `config.yaml` 中，支持中文注释；YAML 解析使用 `go.yaml.in/yaml/v3`，构建时由 Go 自动下载依赖。
 
 ## 1. 编译和试跑
 
@@ -12,8 +12,8 @@
 go test ./...
 go vet ./...
 go build -trimpath -o anqu ./cmd/anqu
-./anqu -config demo/config.json -check-config
-./anqu -config demo/config.json
+./anqu -config demo/config.yaml -check-config
+./anqu -config demo/config.yaml
 ```
 
 演示配置使用项目内的测试文件与模拟 JSONL 登录记录，不读取本机系统登录日志。生成文件位于 `demo/output/`。修改 `demo/watched/app.conf` 后再次运行，即可看到 `modified` 记录；再运行一次，变化数归零，累计变更数保留。
@@ -27,27 +27,26 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o anqu-linux-arm64 ./c
 
 ## 2. 安装到 Linux
 
-先解压对应架构的发布包并进入其目录（例如 `tar -xzf anqu-v0.1.0-linux-amd64.tar.gz`，然后 `cd linux-amd64`），将程序、示例配置、清单放入约定目录。下面也适用于从源码编译后的目录：
+先解压对应架构的发布包并进入其目录（例如 `tar -xzf anqu-v0.2.0-linux-amd64.tar.gz`，然后 `cd linux-amd64`），将程序和配置放入约定目录。下面也适用于从源码编译后的目录：
 
 ```sh
 sudo install -d -m 0755 /usr/local/anqu
 sudo install -m 0755 anqu /usr/local/anqu/anqu
-sudo install -m 0640 configs/config.example.json /usr/local/anqu/config.json
-sudo install -m 0640 configs/files.example.json /usr/local/anqu/files.json
+sudo install -m 0640 configs/config.example.yaml /usr/local/anqu/config.yaml
 ```
 
-**修改 `config.json` 和 `files.json` 为真实路径，再执行：**
+**修改 `config.yaml` 为真实路径，再执行：**
 
 ```sh
-sudo /usr/local/anqu/anqu -config /usr/local/anqu/config.json -check-config
-sudo /usr/local/anqu/anqu -config /usr/local/anqu/config.json
+sudo /usr/local/anqu/anqu -config /usr/local/anqu/config.yaml -check-config
+sudo /usr/local/anqu/anqu -config /usr/local/anqu/config.yaml
 ```
 
 示例包含 `/etc/crontab`，目标主机没有该文件时请替换为真实监控文件；首次 MD5 扫描的配置路径不存在会报错。`-check-config` 检查配置结构、时区、路径规则与清单格式，不提前执行 MD5 或读取登录数据。
 
 ## 3. 配置说明
 
-配置采用 UTF-8 JSON，支持 UTF-8 BOM；不支持注释。未知字段视为配置错误，避免字段拼错后静默使用默认值。三个采集模块可各自设置 `enabled: false`。
+默认读取 `/usr/local/anqu/config.yaml`，也支持 `.yml` 后缀。配置采用 UTF-8 YAML，支持 UTF-8 BOM 和 `# 中文注释`；使用空格缩进，不用 Tab。未知字段、重复字段、多个 YAML 文档及错误的清单格式都会报错。三个采集模块可各自设置 `enabled: false`。完整带中文注释的模板见 [config.example.yaml](configs/config.example.yaml)。
 
 | 字段 | 作用 / 默认值 |
 |---|---|
@@ -62,22 +61,40 @@ sudo /usr/local/anqu/anqu -config /usr/local/anqu/config.json
 | `login.last_command` | `wtmp` 模式使用的 util-linux `last` 命令，默认 `last`；可以填写可执行文件绝对路径 |
 | `login.timeout_seconds` | `last` 超时，默认 10 秒，允许 1–3600 |
 | `login.max_records` | `last` 最多读取的最近记录数量，默认 1000，允许 1–100000 |
-| `existence.list_file` | 外部文件检查清单（JSON 数组）的路径 |
+| `existence.files` | 直接在主配置中填写文件检查清单，每项包含 `path`、`type` |
 | `existence.base_dir` | 清单里相对路径的起始目录 |
 
-除 `state_file` 和清单内路径外，配置里的相对路径均相对于 **config.json 所在目录**；不依赖运行时当前目录。`last_command` 为程序名时按进程 PATH 查找，不经过 shell，也不展开 `$变量`、`~` 或通配符。生产建议填写绝对路径。
+除 `state_file` 和清单内路径外，配置里的相对路径均相对于 **config.yaml 所在目录**；不依赖运行时当前目录。`last_command` 为程序名时按进程 PATH 查找，不经过 shell，也不展开 `$变量`、`~` 或通配符。生产建议填写绝对路径。
 
-文件检查清单示例：
+合并在主配置里的文件检查清单示例：
 
-```json
-[
-  { "path": "ssh/sshd_config", "type": "file" },
-  { "path": "ssh", "type": "directory" },
-  { "path": "/opt/app/config.yaml", "type": "file" }
-]
+```yaml
+existence:
+  enabled: true
+  base_dir: /etc
+  files:
+    - path: ssh/sshd_config
+      type: file
+    - path: ssh
+      type: directory
+    - path: /opt/app/config.yaml
+      type: file
 ```
 
 当 `base_dir` 是 `/etc` 时，前两项对应 `/etc/ssh/sshd_config`、`/etc/ssh`；绝对路径直接使用。`type` 支持 `file`、`directory`、`any`，省略默认为 `file`。不允许重复路径和通过 `../` 越过 `base_dir` 的相对路径；目录以外的检查对象请明确写绝对路径。
+
+启用存在检查时，`existence.files` 至少要有一项；不使用此功能时设置 `existence.enabled: false`。在 `files` 清单中添加文件不会自动加入 MD5 监控，内容变化检查由 `md5.paths` 控制。
+
+### 从 v0.1.0 的两个 JSON 配置迁移
+
+1. 拉取新版源码并重新编译，或下载 v0.2.0 的程序；旧版程序不能直接读取 YAML。
+2. 参考 YAML 模板，把旧 `config.json` 中的各项实际值保留，将 `files.json` 中的条目移入 `existence.files`，删除 `existence.list_file`。
+3. 把文件保存为 `/usr/local/anqu/config.yaml`，使用新版程序执行 `-config /usr/local/anqu/config.yaml -check-config`。
+4. 更新 systemd 单元的 `ExecStart`，将配置路径改为 `/usr/local/anqu/config.yaml`，执行 `systemctl daemon-reload` 后启动任务。
+
+只改变配置格式、保持实际 MD5 路径/排除/递归设置和输出/基线位置不变时，会沿用旧 MD5 基线，不要删除 `state/md5.json`。旧 JSON 文件可以留作备份。升级操作命令见 [需求与实现说明](docs/需求与实现说明.md)。
+
+兼容过渡期间仍可显式执行 `anqu -config /usr/local/anqu/config.json` 使用旧版 JSON + `existence.list_file`。`existence.files` 和 `existence.list_file` 不允许同时配置。默认配置路径已经改为 `.yaml`，不自动回退到旧 JSON。
 
 ## 4. MD5 判定规则
 
@@ -95,7 +112,7 @@ sudo /usr/local/anqu/anqu -config /usr/local/anqu/config.json
 sudo systemctl stop anqu.timer
 sudo systemctl stop anqu.service
 sudo mv /usr/local/anqu/state/md5.json /usr/local/anqu/state/md5.backup.json
-sudo /usr/local/anqu/anqu -config /usr/local/anqu/config.json
+sudo /usr/local/anqu/anqu -config /usr/local/anqu/config.yaml
 sudo systemctl start anqu.timer
 ```
 
@@ -136,8 +153,7 @@ wtmp 反映的是系统记录的登录会话，通常能提供终端。没有分
 ```text
 /usr/local/anqu/
 ├── anqu
-├── config.json
-├── files.json
+├── config.yaml                       # 主配置和存在检查清单合并在这里
 ├── 20261001_100000.123456789+0800.json  # 按时间命名的完整汇总
 ├── 20261001_100000.123456789+0800.prom  # 同一轮的指标归档
 ├── state/
@@ -215,7 +231,7 @@ sudo systemctl status anqu.timer
 journalctl -u anqu.service --no-pager -n 30
 ```
 
-默认开机一分钟后执行，之后每次执行结束五分钟后再执行；`systemd` 的时间精度设置可能带来少量延迟。每轮重读配置、清单，修改配置后下轮生效。也可以自行用 cron 定时调用，二者选一个即可。
+默认开机一分钟后执行，之后每次执行结束五分钟后再执行；`systemd` 的时间精度设置可能带来少量延迟。每轮重读同一个 YAML 配置及其中清单，修改配置后下轮生效。执行周期由 timer 控制，不在 YAML 中设置。也可以自行用 cron 定时调用，二者选一个即可。
 
 | 退出码 | 含义 |
 |---|---|
@@ -227,11 +243,11 @@ systemd 已设置 `SuccessExitStatus=2`，避免把有效的异常发现当作�
 
 报告全部发布完成后才提交 MD5 基线。多个文件不是一次事务：如果程序在发布与提交之间崩溃，下次可能重复记录同一变化，以保留信息为优先。输出目录或配置本身不可用时可能无法生成新错误指标，请同时监控进程退出、任务日志和指标更新时间。
 
-第一版保留全部历史报告，不自动删除；请按实际保留周期安排归档。一个输出目录和一份基线用于一个配置实例，避免不同配置共用最新指标文件。
+程序保留全部历史报告，不自动删除；请按实际保留周期安排归档。一个输出目录和一份基线用于一个配置实例，避免不同配置共用最新指标文件。
 
 ## 8. 验证范围
 
-测试覆盖首次建基线、内容 MD5 已知值、连续扫描、增删改、递归和排除、自身输出排除、基线损坏/范围变化、输出失败保留基线、整个监控路径消失、清单缺失与类型不符、IPv4/IPv6/本地登录、JSONL 时间排序和坏数据、`last` 输出解析、指标标签转义、模块隔离和并发锁。
+测试覆盖首次建基线、内容 MD5 已知值、连续扫描、增删改、递归和排除、自身输出排除、基线损坏/范围变化、输出失败保留基线、整个监控路径消失、清单缺失与类型不符、IPv4/IPv6/本地登录、JSONL 时间排序和坏数据、`last` 输出解析、指标标签转义、模块隔离和并发锁。另覆盖单个 YAML 独立运行、中文注释、默认值、清单修改生效、YAML 严格校验及 JSON 转 YAML 保留基线。
 
 交付构建与测试结果见发布包中的 `BUILD-INFO.txt`。实际 Linux 主机的 wtmp/last 兼容性、systemd 执行及 node_exporter 抓取仍需在目标环境验收。
 

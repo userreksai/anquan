@@ -1,0 +1,26 @@
+# 演示配置：只使用本目录中的测试文件和模拟登录日志。
+output_dir: output
+state_file: state/md5.json
+timezone: Asia/Shanghai
+
+md5:
+  enabled: true
+  paths:
+    - watched
+  recursive: true
+  exclude_paths: []
+
+login:
+  enabled: true
+  source: jsonl
+  path: login.jsonl
+  last_command: last
+  timeout_seconds: 10
+  max_records: 1000
+
+existence:
+  enabled: true
+  base_dir: watched
+  files:
+    - path: app.conf
+      type: file

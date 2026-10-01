@@ -11,43 +11,72 @@ import (
 	"strings"
 	"time"
 	_ "time/tzdata"
+
+	"go.yaml.in/yaml/v3"
 )
 
 type Config struct {
-	OutputDir string          `json:"output_dir"`
-	StateFile string          `json:"state_file"`
-	Timezone  string          `json:"timezone"`
-	MD5       MD5Config       `json:"md5"`
-	Login     LoginConfig     `json:"login"`
-	Existence ExistenceConfig `json:"existence"`
+	OutputDir string          `json:"output_dir" yaml:"output_dir"`
+	StateFile string          `json:"state_file" yaml:"state_file"`
+	Timezone  string          `json:"timezone" yaml:"timezone"`
+	MD5       MD5Config       `json:"md5" yaml:"md5"`
+	Login     LoginConfig     `json:"login" yaml:"login"`
+	Existence ExistenceConfig `json:"existence" yaml:"existence"`
 	location  *time.Location
 }
 
 type MD5Config struct {
-	Enabled      bool     `json:"enabled"`
-	Paths        []string `json:"paths"`
-	Recursive    bool     `json:"recursive"`
-	ExcludePaths []string `json:"exclude_paths"`
+	Enabled      bool     `json:"enabled" yaml:"enabled"`
+	Paths        []string `json:"paths" yaml:"paths"`
+	Recursive    bool     `json:"recursive" yaml:"recursive"`
+	ExcludePaths []string `json:"exclude_paths" yaml:"exclude_paths"`
 }
 
 type LoginConfig struct {
-	Enabled        bool   `json:"enabled"`
-	Source         string `json:"source"`
-	Path           string `json:"path"`
-	LastCommand    string `json:"last_command"`
-	TimeoutSeconds int    `json:"timeout_seconds"`
-	MaxRecords     int    `json:"max_records"`
+	Enabled        bool   `json:"enabled" yaml:"enabled"`
+	Source         string `json:"source" yaml:"source"`
+	Path           string `json:"path" yaml:"path"`
+	LastCommand    string `json:"last_command" yaml:"last_command"`
+	TimeoutSeconds int    `json:"timeout_seconds" yaml:"timeout_seconds"`
+	MaxRecords     int    `json:"max_records" yaml:"max_records"`
 }
 
 type ExistenceConfig struct {
-	Enabled  bool   `json:"enabled"`
-	ListFile string `json:"list_file"`
-	BaseDir  string `json:"base_dir"`
+	Enabled bool         `json:"enabled" yaml:"enabled"`
+	BaseDir string       `json:"base_dir" yaml:"base_dir"`
+	Files   []CheckEntry `json:"files,omitempty" yaml:"files,omitempty"`
+	// ListFile is retained for explicitly selected v0.1.0 JSON configurations.
+	ListFile string `json:"list_file,omitempty" yaml:"list_file,omitempty"`
 }
 
 type CheckEntry struct {
-	Path string `json:"path"`
-	Type string `json:"type"`
+	Path string `json:"path" yaml:"path"`
+	Type string `json:"type" yaml:"type"`
+}
+
+func readConfig(path string, target *Config) error {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".json":
+		return readJSON(path, target)
+	case ".yaml", ".yml":
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		b = bytes.TrimPrefix(b, []byte{0xef, 0xbb, 0xbf})
+		d := yaml.NewDecoder(bytes.NewReader(b))
+		d.KnownFields(true)
+		if err := d.Decode(target); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		var extra any
+		if err := d.Decode(&extra); err != io.EOF {
+			return fmt.Errorf("%s: expected exactly one YAML document", path)
+		}
+		return nil
+	default:
+		return fmt.Errorf("configuration must use .yaml, .yml or .json: %s", path)
+	}
 }
 
 func readJSON(path string, target any) error {
@@ -76,7 +105,7 @@ func LoadConfig(path string) (Config, error) {
 		Login:     LoginConfig{Enabled: true, Source: "wtmp", Path: "/var/log/wtmp", LastCommand: "last", TimeoutSeconds: 10, MaxRecords: 1000},
 		Existence: ExistenceConfig{Enabled: true},
 	}
-	if err := readJSON(path, &c); err != nil {
+	if err := readConfig(path, &c); err != nil {
 		return c, err
 	}
 	absolute, err := filepath.Abs(path)
@@ -130,10 +159,15 @@ func LoadConfig(path string) (Config, error) {
 		}
 	}
 	if c.Existence.Enabled {
-		if strings.TrimSpace(c.Existence.ListFile) == "" || strings.TrimSpace(c.Existence.BaseDir) == "" {
-			return c, fmt.Errorf("existence.list_file and base_dir are required")
+		if strings.TrimSpace(c.Existence.BaseDir) == "" {
+			return c, fmt.Errorf("existence.base_dir is required")
 		}
-		c.Existence.ListFile = resolve(base, c.Existence.ListFile)
+		if c.Existence.ListFile != "" {
+			if strings.TrimSpace(c.Existence.ListFile) == "" {
+				return c, fmt.Errorf("existence.list_file cannot be whitespace")
+			}
+			c.Existence.ListFile = resolve(base, c.Existence.ListFile)
+		}
 		c.Existence.BaseDir = resolve(base, c.Existence.BaseDir)
 		if _, err := loadChecks(c.Existence); err != nil {
 			return c, err
@@ -143,12 +177,18 @@ func LoadConfig(path string) (Config, error) {
 }
 
 func loadChecks(c ExistenceConfig) ([]CheckEntry, error) {
-	var entries []CheckEntry
-	if err := readJSON(c.ListFile, &entries); err != nil {
-		return nil, err
+	if c.Files != nil && c.ListFile != "" {
+		return nil, fmt.Errorf("use existence.files or legacy existence.list_file, not both")
+	}
+	// Validate a copy so resolving paths never mutates the configured inline list.
+	entries := append([]CheckEntry(nil), c.Files...)
+	if c.ListFile != "" {
+		if err := readJSON(c.ListFile, &entries); err != nil {
+			return nil, err
+		}
 	}
 	if len(entries) == 0 {
-		return nil, fmt.Errorf("existence list cannot be empty")
+		return nil, fmt.Errorf("existence.files must contain at least one path (or use legacy list_file)")
 	}
 	seen := map[string]bool{}
 	for i := range entries {

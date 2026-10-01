@@ -1,0 +1,37 @@
+# Anqu 安全巡检：一个配置文件包含全部设置及文件检查清单。
+# 请按实际环境修改路径。使用空格缩进，不要使用 Tab。
+
+output_dir: /usr/local/anqu     # 报告和指标输出目录
+state_file: state/md5.json      # MD5 基线；相对路径以 output_dir 为基准
+timezone: Asia/Shanghai        # 显示时区，北京时间；泰国可填 Asia/Bangkok
+
+md5:
+  enabled: true                # 是否开启 MD5 内容变化检查
+  paths:                       # 监控文件或目录；首次扫描时必须存在
+    - /etc/ssh
+    - /etc/crontab              # 本机不存在时请替换或移除
+  recursive: true              # 是否递归扫描子目录
+  exclude_paths:               # 排除具体路径，不支持 *.log 等通配符
+    - /etc/ssh/ssh_config.d/cache
+  # 没有排除项时写：exclude_paths: []（替换上面的列表，不要重复写字段）
+
+login:
+  enabled: true                # 是否读取最近一次用户登录
+  source: wtmp                 # wtmp 或 jsonl
+  path: /var/log/wtmp          # 登录数据源；不是普通 auth.log/secure 文本日志
+  last_command: last           # wtmp 模式使用的 util-linux last 命令
+  timeout_seconds: 10          # last 命令超时秒数
+  max_records: 1000            # last 最多读取的最近记录数量
+
+existence:
+  enabled: true                # 是否检查下面清单中的文件/目录
+  base_dir: /etc               # 清单相对路径的根目录
+  files:                      # 原 files.json 的内容合并到这里
+    - path: ssh/sshd_config    # 实际路径：/etc/ssh/sshd_config
+      type: file              # 普通文件；省略 type 时默认 file
+    - path: passwd             # 实际路径：/etc/passwd
+      type: file
+    - path: ssh                # 实际路径：/etc/ssh
+      type: directory         # 必须是目录；any 表示只检查存在
+    - path: /etc/crontab       # 绝对路径直接使用，请按实际需要调整
+      type: file
