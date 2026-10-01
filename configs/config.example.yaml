@@ -1,5 +1,11 @@
-# Anqu 安全巡检：一个配置文件包含全部设置及文件检查清单。
-# 请按实际环境修改路径。使用空格缩进，不要使用 Tab。
+# Anqu v0.3.0：仅供 A 构建机使用的 YAML 配置，不下发到 B/C 节点。
+# 在源码根目录复制为 config.yaml，修改后执行：
+# go run ./cmd/anqu-build -output ./dist/anqu-linux-amd64 -goos linux -goarch amd64
+# 构建工具默认读取当前工作目录 config.yaml，校验后加密嵌入节点程序。
+# 节点只运行生成的程序；配置变更必须在 A 重新编译并下发。
+# 路径指 B/C 节点上的路径。除下述特殊规则外，相对路径以节点程序所在目录为基准。
+# 报告和指标保留真实路径；加密内置不能保证抵抗反编译、root 或内存提取。
+# 使用 UTF-8 和空格缩进，不要使用 Tab；不支持 JSON 配置或 list_file。
 
 output_dir: /usr/local/anqu     # 报告和指标输出目录
 state_file: state/md5.json      # MD5 基线；相对路径以 output_dir 为基准
@@ -9,7 +15,7 @@ md5:
   enabled: true                # 是否开启 MD5 内容变化检查
   paths:                       # 监控文件或目录；首次扫描时必须存在
     - /etc/ssh
-    - /etc/crontab              # 本机不存在时请替换或移除
+    - /etc/crontab              # 目标节点不存在时请替换或移除
   recursive: true              # 是否递归扫描子目录
   exclude_paths:               # 排除具体路径，不支持 *.log 等通配符
     - /etc/ssh/ssh_config.d/cache
@@ -26,7 +32,7 @@ login:
 existence:
   enabled: true                # 是否检查下面清单中的文件/目录
   base_dir: /etc               # 清单相对路径的根目录
-  files:                      # 原 files.json 的内容合并到这里
+  files:                      # 文件存在检查清单直接写在这里
     - path: ssh/sshd_config    # 实际路径：/etc/ssh/sshd_config
       type: file              # 普通文件；省略 type 时默认 file
     - path: passwd             # 实际路径：/etc/passwd

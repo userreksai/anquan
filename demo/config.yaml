@@ -1,4 +1,7 @@
-# 演示配置：只使用本目录中的测试文件和模拟登录日志。
+# 构建输入：在项目根目录执行以下命令，将节点程序输出到 demo 目录：
+# go run ./cmd/anqu-build -config ./demo/config.yaml -output ./demo/anqu -goos linux -goarch amd64
+# 在 Linux 上执行 ./demo/anqu。相对路径以程序所在目录为基准，因此读取 demo 中的演示数据。
+# 节点程序不会读取此 YAML；修改配置后需要重新构建。
 output_dir: output
 state_file: state/md5.json
 timezone: Asia/Shanghai

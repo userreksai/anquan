@@ -1,4 +1,4 @@
-Anqu v0.2.0 - unified YAML configuration
+Anqu v0.3.0 - encrypted YAML embedded at build time
 Build date: 2026-10-01 (Asia/Bangkok)
 Language: Go
 Runtime dependency: go.yaml.in/yaml/v3 v3.0.4
@@ -7,24 +7,29 @@ Module minimum Go version: 1.22
 
 Validation completed on Windows/amd64:
 - go test ./... -cover: PASS
-- 19 top-level tests plus table-driven/subtests: PASS
-- internal/audit statement coverage: 83.8%
+- 34 top-level tests plus table-driven/subtests: PASS
+- cmd/anqu statement coverage: 82.5%
+- cmd/anqu-build statement coverage: 69.2%
+- internal/audit statement coverage: 84.1%
+- internal/sealed statement coverage: 89.3%
 - go vet ./...: PASS
-- CLI YAML example/config validation: exit 0
-- CLI standalone YAML initial baseline: exit 0
-- CLI YAML changed content: exit 2
-- CLI legacy JSON reuses the YAML baseline: exit 0
-- CLI inline missing required file: exit 2
-- CLI duplicate YAML key: exit 1
-- CLI malformed login data: exit 1
-- CLI help/default YAML configuration path: PASS
-- YAML comments, .yaml/.yml, defaults, path types and strict validation: PASS
-- JSON-to-YAML migration preserves MD5 baseline and observed changes: PASS
+- YAML strict validation, JSON/legacy list-file rejection: PASS
+- Authenticated encryption, random nonces, tamper/wrong-key rejection: PASS
+- Failed compiler preserves existing agent and cleans temporary files: PASS
+- Build from current-directory config.yaml on simulated A: PASS
+- Copy only executable to simulated B/C and run from unrelated directory: PASS
+- Initial baseline exit 0; changed content exit 2; normal runs silent: PASS
+- Agent rejects -config; unrelated adjacent config.yaml is ignored: PASS
+- Reports retain real monitored paths: PASS
+- Edit A YAML and rebuild C; existing B retains its prior settings: PASS
+- Private test configuration values absent from direct binary string scan: PASS
+- Temporary payload sources and private build caches cleaned: PASS
 
 Cross-compilation completed:
 - CGO_ENABLED=0 GOOS=linux GOARCH=amd64 (GOAMD64=v1)
 - CGO_ENABLED=0 GOOS=linux GOARCH=arm64 (GOARM64=v8.0)
-- Build metadata verified for both Linux executables.
+- Both encrypted agent probes and A-side build tools compile successfully.
+- ELF architecture verified for both Linux build tools and agent probes.
 
 Not executed here:
 - Linux runtime and Linux flock behavior
@@ -32,7 +37,18 @@ Not executed here:
 - systemd timer/service installation
 - node_exporter live scraping / Prometheus ingestion
 
-Linux packages contain the executable named "anqu", source code, example
-YAML configuration, tests, demo inputs, deployment units and Chinese documentation.
-The source ZIP excludes toolchains, build caches, local baselines and generated
-reports. SHA256SUMS.txt records checksums of the three release archives.
+Release contents:
+- Source ZIP and two A-side Linux build-tool archives (amd64 / arm64).
+- Build-tool archives include anqu-build, source, example YAML, tests,
+  demo inputs, deployment units, and Chinese documentation.
+- A requires Go and builds its own agent from private config.yaml.
+- Only that generated agent is deployed to B/C; no runtime config is read.
+- No configured node executable or private configuration is published.
+- Source packages retain an empty embedded-payload stub.
+- Archives exclude toolchains, caches, local baselines, and generated reports.
+- SHA256SUMS.txt records checksums of the three release archives.
+
+AES-256-GCM reduces direct plaintext exposure, but the self-contained agent
+necessarily contains decryption material. This does not prevent a local
+administrator, reverse engineer, or memory inspection from recovering settings.
+Reports, metrics and MD5 state intentionally retain real monitored paths.

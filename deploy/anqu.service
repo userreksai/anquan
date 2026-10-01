@@ -6,7 +6,9 @@ After=local-fs.target
 Type=oneshot
 User=root
 UMask=0022
-ExecStart=/usr/local/anqu/anqu -config /usr/local/anqu/config.yaml
+ExecStart=/usr/local/anqu/anqu
+# Reduce accidental core dumps; this does not prevent root from inspecting memory.
+LimitCORE=0
 # 2 means collection succeeded but changes/missing files were found.
 SuccessExitStatus=2
 NoNewPrivileges=true

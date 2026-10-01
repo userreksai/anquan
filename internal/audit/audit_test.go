@@ -1,12 +1,13 @@
 package audit
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"go.yaml.in/yaml/v3"
 )
 
 func put(t *testing.T, path, value string) {
@@ -19,9 +20,9 @@ func put(t *testing.T, path, value string) {
 	}
 }
 
-func jsonPut(t *testing.T, path string, value any) {
+func yamlPut(t *testing.T, path string, value any) {
 	t.Helper()
-	b, err := json.Marshal(value)
+	b, err := yaml.Marshal(value)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,15 +43,14 @@ func testConfig(t *testing.T) Config {
 	root := t.TempDir()
 	put(t, filepath.Join(root, "watched", "app.conf"), "initial\n")
 	put(t, filepath.Join(root, "login.jsonl"), "{\"source_ip\":\"192.0.2.1\",\"login_time\":\"2026-10-01T08:00:00+08:00\",\"user\":\"ops\",\"terminal\":\"pts/1\"}\n")
-	jsonPut(t, filepath.Join(root, "files.json"), []CheckEntry{{Path: "app.conf", Type: "file"}})
 	c := Config{
 		OutputDir: "output", StateFile: "state/md5.json", Timezone: "Asia/Shanghai",
 		MD5:       MD5Config{Enabled: true, Paths: []string{"watched"}, Recursive: true},
 		Login:     LoginConfig{Enabled: true, Source: "jsonl", Path: "login.jsonl", LastCommand: "last", TimeoutSeconds: 10, MaxRecords: 1000},
-		Existence: ExistenceConfig{Enabled: true, ListFile: "files.json", BaseDir: "watched"},
+		Existence: ExistenceConfig{Enabled: true, Files: []CheckEntry{{Path: "app.conf", Type: "file"}}, BaseDir: "watched"},
 	}
-	path := filepath.Join(root, "config.json")
-	jsonPut(t, path, c)
+	path := filepath.Join(root, "config.yaml")
+	yamlPut(t, path, c)
 	c, err := LoadConfig(path)
 	if err != nil {
 		t.Fatal(err)
@@ -243,10 +243,10 @@ func TestMissingRootAfterBaselineIsDeletion(t *testing.T) {
 
 func TestExistenceTypesAndMissing(t *testing.T) {
 	c := testConfig(t)
-	jsonPut(t, c.Existence.ListFile, []CheckEntry{
+	c.Existence.Files = []CheckEntry{
 		{Path: "app.conf", Type: "file"}, {Path: "absent", Type: "file"},
 		{Path: ".", Type: "file"}, {Path: "child", Type: "directory"},
-	})
+	}
 	if err := os.Mkdir(filepath.Join(c.Existence.BaseDir, "child"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -324,27 +324,30 @@ func TestMetricLabels(t *testing.T) {
 }
 
 func TestConfigRejectsInvalidInputs(t *testing.T) {
-	for _, name := range []string{"unknown-field", "duplicate-check", "relative-escape", "empty-checks", "invalid-timezone", "excluded-root", "multiple-json-values"} {
+	for _, name := range []string{"unknown-field", "duplicate-check", "relative-escape", "empty-checks", "invalid-timezone", "excluded-root", "multiple-documents"} {
 		t.Run(name, func(t *testing.T) {
 			c := testConfig(t)
-			path := filepath.Join(filepath.Dir(c.OutputDir), "config.json")
+			path := filepath.Join(filepath.Dir(c.OutputDir), "config.yaml")
 			switch name {
 			case "unknown-field":
-				put(t, path, `{"typo":true}`)
+				put(t, path, "typo: true\n")
 			case "duplicate-check":
-				jsonPut(t, c.Existence.ListFile, []CheckEntry{{Path: "app.conf"}, {Path: "app.conf"}})
+				c.Existence.Files = []CheckEntry{{Path: "app.conf"}, {Path: "app.conf"}}
+				yamlPut(t, path, c)
 			case "relative-escape":
-				jsonPut(t, c.Existence.ListFile, []CheckEntry{{Path: "../escape"}})
+				c.Existence.Files = []CheckEntry{{Path: "../escape"}}
+				yamlPut(t, path, c)
 			case "empty-checks":
-				put(t, c.Existence.ListFile, "[]")
+				c.Existence.Files = nil
+				yamlPut(t, path, c)
 			case "invalid-timezone":
 				c.Timezone = "Invalid/Zone"
-				jsonPut(t, path, c)
+				yamlPut(t, path, c)
 			case "excluded-root":
 				c.MD5.Paths = []string{c.OutputDir}
-				jsonPut(t, path, c)
-			case "multiple-json-values":
-				put(t, path, read(t, path)+"\n{}")
+				yamlPut(t, path, c)
+			case "multiple-documents":
+				put(t, path, read(t, path)+"\n---\noutput_dir: other\n")
 			}
 			if _, err := LoadConfig(path); err == nil {
 				t.Fatal("invalid configuration accepted")

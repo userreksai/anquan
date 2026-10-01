@@ -1,52 +1,81 @@
-# Anqu：文件与登录巡检（v0.2.0）
+# Anqu：文件与登录巡检（v0.3.0）
 
 按配置执行一次巡检：计算文件 MD5 并记录变化、读取最近一条登录记录、检查清单中的文件或目录。每次生成 JSON 汇总和 Prometheus / node_exporter Textfile Collector 格式的 `.prom` 文件。
 
-完整需求及功能边界见 [需求与实现说明](docs/需求与实现说明.md)。目标运行环境为 Linux。所有设置及文件检查清单合并在一个 `config.yaml` 中，支持中文注释；YAML 解析使用 `go.yaml.in/yaml/v3`，构建时由 Go 自动下载依赖。
+目标运行环境为 Linux。**A 服务器保留 YAML 和源码，构建时加密内置配置；B/C 节点只接收并运行生成的程序，不读取外部配置文件。** 修改 YAML 后重新构建，可用于另一台或一组路径相同的节点。JSON 配置和独立文件清单入口已取消，JSON 报告、JSON 基线与 JSONL 登录日志保留。
 
-## 1. 编译和试跑
+配置加密采用 AES-256-GCM，每次构建生成随机密钥和 nonce；构建时去除 Go 调试符号和构建路径。这样减少配置明文直接暴露，但**不能保证无法反编译或提取配置**：独立程序必须能自行解密，有 root 权限或能分析程序/内存的人仍可能恢复信息。按本次需求，报告和指标继续保留真实路径，基线也包含监控路径。完整功能边界见 [需求与实现说明](docs/需求与实现说明.md)。
 
-需要 Go 1.22 或更新版本。在项目根目录执行：
+## 1. A 服务器：配置并构建
+
+需要 Git、Go 1.22 或更新版本。首次构建会由 Go 下载 YAML 解析依赖。在 A 上执行：
 
 ```sh
+git clone https://github.com/userreksai/anquan.git
+cd anquan
+
+# 仅首次复制模板；已有 config.yaml 时不覆盖
+if [ ! -e config.yaml ]; then
+  cp configs/config.example.yaml config.yaml
+fi
+chmod 0600 config.yaml
+vi config.yaml
+
 go test ./...
 go vet ./...
-go build -trimpath -o anqu ./cmd/anqu
-./anqu -config demo/config.yaml -check-config
-./anqu -config demo/config.yaml
+
+# 默认读取运行构建命令时当前目录下的 config.yaml
+go run ./cmd/anqu-build -output ./dist/anqu-linux-amd64 -goos linux -goarch amd64
+
+# ARM64 节点改用以下命令
+go run ./cmd/anqu-build -output ./dist/anqu-linux-arm64 -goos linux -goarch arm64
 ```
 
-演示配置使用项目内的测试文件与模拟 JSONL 登录记录，不读取本机系统登录日志。生成文件位于 `demo/output/`。修改 `demo/watched/app.conf` 后再次运行，即可看到 `modified` 记录；再运行一次，变化数归零，累计变更数保留。
+模板内填写的是 **B/C 节点上的路径**，不是 A 的路径。构建工具严格校验配置结构、时区、路径规则和清单格式，不要求 A 存在这些被监控文件，也不提前执行巡检。示例中的 `/etc/crontab` 在目标节点不存在时请替换或移除。
 
-从 Windows/macOS 交叉编译 Linux 程序（以下为 Linux shell 写法；PowerShell 用 `$env:GOOS='linux'` 等设置）：
+构建工具参数：
+
+| 参数 | 用途 |
+|---|---|
+| `-config` | YAML 输入路径，默认当前工作目录的 `config.yaml`；支持 `.yaml` / `.yml` |
+| `-output` | 生成的节点程序路径，例如 `./dist/anqu-linux-amd64` |
+| `-goos` | 目标系统，默认 `linux` |
+| `-goarch` | 目标 CPU 架构，默认构建工具所在主机架构；建议显式指定 `amd64` 或 `arm64` |
+| `-go` | 用于编译的 Go 可执行文件，默认 `go` |
+
+构建工具通过 Go overlay 内置加密数据，临时目录不保存配置明文；使用独立的临时 Go 构建缓存并在结束后清理。A 上的原始 YAML 仍保留，供以后修改。私有 `config.yaml` / `config.yml` 已加入根目录 `.gitignore`，不要提交真实配置或将其放进节点发布包。
+
+发布包只提供源码和构建工具，不提供含通用真实配置的节点程序。使用构建工具包时，仍需在 A 安装 Go，进入随包源码根目录，准备 `config.yaml` 后运行 `./anqu-build -output ./dist/anqu-linux-amd64 -goos linux -goarch amd64`。普通 `go build ./cmd/anqu` 不会嵌入配置，生成物不能用于巡检。
+
+演示（以下适用于 Linux amd64）：
 
 ```sh
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o anqu-linux-amd64 ./cmd/anqu
-CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o anqu-linux-arm64 ./cmd/anqu
+go run ./cmd/anqu-build -config ./demo/config.yaml -output ./demo/anqu -goos linux -goarch amd64
+./demo/anqu
 ```
 
-## 2. 安装到 Linux
+程序所在目录为 `demo`，因此读取该目录内的测试文件与模拟 JSONL 登录记录，结果位于 `demo/output/`。修改 `demo/watched/app.conf` 后再运行，可看到 `modified`；再运行一次，本轮变化数归零，累计变化数保留。默认运行不打印摘要，用报告和退出码查看结果。
 
-先解压对应架构的发布包并进入其目录（例如 `tar -xzf anqu-v0.2.0-linux-amd64.tar.gz`，然后 `cd linux-amd64`），将程序和配置放入约定目录。下面也适用于从源码编译后的目录：
+## 2. B/C 节点：只部署程序
+
+将 A 构建的对应架构程序传到节点。可以同时传入 `deploy/anqu.service`、`deploy/anqu.timer` 用于定时执行；**不用传 YAML、源码或构建工具**。假定程序已放在节点当前目录：
 
 ```sh
 sudo install -d -m 0755 /usr/local/anqu
-sudo install -m 0755 anqu /usr/local/anqu/anqu
-sudo install -m 0640 configs/config.example.yaml /usr/local/anqu/config.yaml
+sudo install -m 0700 ./anqu-linux-amd64 /usr/local/anqu/anqu
+sudo /usr/local/anqu/anqu
+echo $?
 ```
 
-**修改 `config.yaml` 为真实路径，再执行：**
+节点程序只提供 `-help` 和 `-version`，没有 `-config`、`-check-config` 或导出配置命令，不读取旁边的 YAML/JSON，也不会输出完整配置。巡检完成默认安静退出，查看本轮 JSON、指标和退出码；采集或输出故障仍应结合任务日志排查。生成的节点程序默认权限 0700，仅所有者可读写执行；按上述命令由 root 安装后由 root 任务运行，这不限制 root 自身的检查能力。
 
-```sh
-sudo /usr/local/anqu/anqu -config /usr/local/anqu/config.yaml -check-config
-sudo /usr/local/anqu/anqu -config /usr/local/anqu/config.yaml
-```
+需要给 C 使用时，在 A 修改 `config.yaml`，重新执行构建并下发新的程序；路径相同、架构兼容的节点也可以共用同一构建。目标节点不需要安装 Go；wtmp 模式仍需要兼容的 util-linux `last`。
 
-示例包含 `/etc/crontab`，目标主机没有该文件时请替换为真实监控文件；首次 MD5 扫描的配置路径不存在会报错。`-check-config` 检查配置结构、时区、路径规则与清单格式，不提前执行 MD5 或读取登录数据。
+旧版本升级及节点遗留配置清理步骤见 [升级说明](docs/需求与实现说明.md#七已有服务器升级到内置配置)。
 
-## 3. 配置说明
+## 3. A 上的 YAML 配置说明
 
-默认读取 `/usr/local/anqu/config.yaml`，也支持 `.yml` 后缀。配置采用 UTF-8 YAML，支持 UTF-8 BOM 和 `# 中文注释`；使用空格缩进，不用 Tab。未知字段、重复字段、多个 YAML 文档及错误的清单格式都会报错。三个采集模块可各自设置 `enabled: false`。完整带中文注释的模板见 [config.example.yaml](configs/config.example.yaml)。
+构建时默认读取当前工作目录的 `config.yaml`，也可用 `-config` 指定其他 YAML。配置采用 UTF-8，支持 BOM 和 `# 中文注释`；使用空格缩进，不用 Tab。未知字段、重复字段、多个 YAML 文档及错误清单会导致构建失败；不接受 JSON 配置和 `existence.list_file`。三个模块可分别设置 `enabled: false`。中文模板见 [config.example.yaml](configs/config.example.yaml)。
 
 | 字段 | 作用 / 默认值 |
 |---|---|
@@ -64,7 +93,7 @@ sudo /usr/local/anqu/anqu -config /usr/local/anqu/config.yaml
 | `existence.files` | 直接在主配置中填写文件检查清单，每项包含 `path`、`type` |
 | `existence.base_dir` | 清单里相对路径的起始目录 |
 
-除 `state_file` 和清单内路径外，配置里的相对路径均相对于 **config.yaml 所在目录**；不依赖运行时当前目录。`last_command` 为程序名时按进程 PATH 查找，不经过 shell，也不展开 `$变量`、`~` 或通配符。生产建议填写绝对路径。
+除 `state_file` 和清单内路径外，配置里的相对路径均相对于 **B/C 节点可执行程序所在目录**，不依赖 A 的构建路径或 B/C 启动命令时所在目录。`state_file` 相对于 `output_dir`，清单项相对于 `existence.base_dir`；绝对路径直接使用。`last_command` 为程序名时按进程 PATH 查找，不经过 shell，也不展开 `$变量`、`~` 或通配符。生产建议填写绝对路径。
 
 合并在主配置里的文件检查清单示例：
 
@@ -85,16 +114,7 @@ existence:
 
 启用存在检查时，`existence.files` 至少要有一项；不使用此功能时设置 `existence.enabled: false`。在 `files` 清单中添加文件不会自动加入 MD5 监控，内容变化检查由 `md5.paths` 控制。
 
-### 从 v0.1.0 的两个 JSON 配置迁移
-
-1. 拉取新版源码并重新编译，或下载 v0.2.0 的程序；旧版程序不能直接读取 YAML。
-2. 参考 YAML 模板，把旧 `config.json` 中的各项实际值保留，将 `files.json` 中的条目移入 `existence.files`，删除 `existence.list_file`。
-3. 把文件保存为 `/usr/local/anqu/config.yaml`，使用新版程序执行 `-config /usr/local/anqu/config.yaml -check-config`。
-4. 更新 systemd 单元的 `ExecStart`，将配置路径改为 `/usr/local/anqu/config.yaml`，执行 `systemctl daemon-reload` 后启动任务。
-
-只改变配置格式、保持实际 MD5 路径/排除/递归设置和输出/基线位置不变时，会沿用旧 MD5 基线，不要删除 `state/md5.json`。旧 JSON 文件可以留作备份。升级操作命令见 [需求与实现说明](docs/需求与实现说明.md)。
-
-兼容过渡期间仍可显式执行 `anqu -config /usr/local/anqu/config.json` 使用旧版 JSON + `existence.list_file`。`existence.files` 和 `existence.list_file` 不允许同时配置。默认配置路径已经改为 `.yaml`，不自动回退到旧 JSON。
+旧配置应迁移到 A 的 YAML；把旧 `files.json` 条目移入 `existence.files`，删除 `existence.list_file`。保持实际 MD5 路径、排除、递归和输出/基线位置不变时可复用旧基线，不要删除 `state/md5.json`。从旧版本迁移相对路径时注意基准目录的变化，必要时改为绝对路径。配置变更必须重新构建并替换节点程序。
 
 ## 4. MD5 判定规则
 
@@ -106,13 +126,14 @@ existence:
 - 按文件内容判断；仅权限、属主、时间戳变化，不算 MD5 内容变化。重命名按删除旧文件和新增新文件处理。
 - 跳过符号链接、设备、管道等非普通文件，汇总跳过数量；不递归进入符号链接目录。输出目录、基线和锁自动排除。
 
-修改监控路径、排除路径、递归选项或输出/状态位置后，旧基线的扫描范围不再匹配，程序会报错。请停止定时任务，将旧状态文件改名备份，然后运行以建立新基线。例如：
+在 A 修改监控路径、排除路径、递归选项或输出/状态位置并重新构建后，旧基线的扫描范围不再匹配，程序会报错。请停止定时任务、替换程序，将旧状态文件改名备份，然后运行以建立新基线。例如，以下在节点执行（新程序已传到当前目录）：
 
 ```sh
 sudo systemctl stop anqu.timer
 sudo systemctl stop anqu.service
+sudo install -m 0700 ./anqu-linux-amd64 /usr/local/anqu/anqu
 sudo mv /usr/local/anqu/state/md5.json /usr/local/anqu/state/md5.backup.json
-sudo /usr/local/anqu/anqu -config /usr/local/anqu/config.yaml
+sudo /usr/local/anqu/anqu
 sudo systemctl start anqu.timer
 ```
 
@@ -153,7 +174,6 @@ wtmp 反映的是系统记录的登录会话，通常能提供终端。没有分
 ```text
 /usr/local/anqu/
 ├── anqu
-├── config.yaml                       # 主配置和存在检查清单合并在这里
 ├── 20261001_100000.123456789+0800.json  # 按时间命名的完整汇总
 ├── 20261001_100000.123456789+0800.prom  # 同一轮的指标归档
 ├── state/
@@ -164,6 +184,16 @@ wtmp 反映的是系统记录的登录会话，通常能提供终端。没有分
 ```
 
 JSON 内 `collection_success` 表示采集是否完成，不代表没有异常：文件变化、文件缺失或类型不匹配仍是有效采集结果。三个模块各有 `enabled`、`success` 和详细数据；错误放在 `errors` 数组中。
+
+节点目录没有需要读取的 `config.yaml` 或 `files.json`。报告、指标和基线保留真实文件路径以便排查，这些输出并未加密。查看最近一次 MD5 变化（需要安装 `jq`）：
+
+```sh
+report=$(ls -1t /usr/local/anqu/[0-9]*.json | head -n 1)
+jq '.md5.changes' "$report"
+cat /usr/local/anqu/textfile/anqu.prom
+```
+
+成功扫描后基线会更新，下一轮未再次变动则变化数为 0；需要追溯时查看之前的时间命名 JSON。
 
 给现有 node_exporter 增加参数：
 
@@ -231,7 +261,7 @@ sudo systemctl status anqu.timer
 journalctl -u anqu.service --no-pager -n 30
 ```
 
-默认开机一分钟后执行，之后每次执行结束五分钟后再执行；`systemd` 的时间精度设置可能带来少量延迟。每轮重读同一个 YAML 配置及其中清单，修改配置后下轮生效。执行周期由 timer 控制，不在 YAML 中设置。也可以自行用 cron 定时调用，二者选一个即可。
+默认开机一分钟后执行，之后每次执行结束五分钟后再执行；`systemd` 的时间精度设置可能带来少量延迟。每轮使用程序内置配置，不读取节点配置文件。执行周期由 timer 控制，不在 YAML 中设置。也可以自行用 cron 定时调用，二者选一个即可。附带服务设置 `LimitCORE=0`，减少意外生成 core dump，不能阻止 root 检查程序或内存。
 
 | 退出码 | 含义 |
 |---|---|
@@ -241,13 +271,13 @@ journalctl -u anqu.service --no-pager -n 30
 
 systemd 已设置 `SuccessExitStatus=2`，避免把有效的异常发现当作服务执行失败。Linux 使用非阻塞文件锁避免相同基线的任务并发；进程退出自动释放锁，不要删除正在使用的锁文件。非 Linux 仅供开发演示，使用目录锁；异常退出后需确认没有在运行的进程，再手动清理对应锁目录。
 
-报告全部发布完成后才提交 MD5 基线。多个文件不是一次事务：如果程序在发布与提交之间崩溃，下次可能重复记录同一变化，以保留信息为优先。输出目录或配置本身不可用时可能无法生成新错误指标，请同时监控进程退出、任务日志和指标更新时间。
+报告全部发布完成后才提交 MD5 基线。多个文件不是一次事务：如果程序在发布与提交之间崩溃，下次可能重复记录同一变化，以保留信息为优先。输出目录不可用或内置配置加载失败时可能无法生成新错误指标，请同时监控进程退出、任务日志和指标更新时间。
 
 程序保留全部历史报告，不自动删除；请按实际保留周期安排归档。一个输出目录和一份基线用于一个配置实例，避免不同配置共用最新指标文件。
 
 ## 8. 验证范围
 
-测试覆盖首次建基线、内容 MD5 已知值、连续扫描、增删改、递归和排除、自身输出排除、基线损坏/范围变化、输出失败保留基线、整个监控路径消失、清单缺失与类型不符、IPv4/IPv6/本地登录、JSONL 时间排序和坏数据、`last` 输出解析、指标标签转义、模块隔离和并发锁。另覆盖单个 YAML 独立运行、中文注释、默认值、清单修改生效、YAML 严格校验及 JSON 转 YAML 保留基线。
+已通过 34 个顶层测试及其子测试，覆盖 MD5 基线与增删改、递归/排除、输出失败、清单缺失/类型不符、登录解析、指标、模块隔离、并发锁、YAML 严格校验、拒绝 JSON 配置和旧清单入口、加密载荷完整性及节点相对路径。Windows 集成验证已确认：只复制程序即可运行、不读取旁边的配置文件、修改 A 的 YAML 重新构建后 C 使用新配置而 B 保持原配置。Linux amd64/arm64 节点程序和构建工具均已交叉编译通过。
 
 交付构建与测试结果见发布包中的 `BUILD-INFO.txt`。实际 Linux 主机的 wtmp/last 兼容性、systemd 执行及 node_exporter 抓取仍需在目标环境验收。
 

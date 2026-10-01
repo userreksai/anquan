@@ -1,7 +1,6 @@
 package audit
 
 import (
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,11 +30,9 @@ func TestYAMLStandaloneLifecycle(t *testing.T) {
 		t.Run(extension, func(t *testing.T) {
 			legacy := testConfig(t)
 			root := filepath.Dir(legacy.OutputDir)
-			// Prove that neither of the old configuration files is consulted.
+			// Invalid legacy files next to YAML must not be consulted.
 			for _, name := range []string{"config.json", "files.json"} {
-				if err := os.Remove(filepath.Join(root, name)); err != nil {
-					t.Fatal(err)
-				}
+				put(t, filepath.Join(root, name), "invalid legacy input")
 			}
 			path := filepath.Join(root, "config"+extension)
 			put(t, path, "\xef\xbb\xbf"+inlineYAML)
@@ -46,7 +43,7 @@ func TestYAMLStandaloneLifecycle(t *testing.T) {
 			if !c.MD5.Enabled || !c.MD5.Recursive || !c.Login.Enabled || !c.Existence.Enabled || c.Login.TimeoutSeconds != 10 || c.Login.MaxRecords != 1000 {
 				t.Fatal("YAML defaults lost")
 			}
-			if c.Existence.ListFile != "" || c.Existence.Files[0].Path != "app.conf" {
+			if c.Existence.Files[0].Path != "app.conf" {
 				t.Fatal("inline list was mutated or a separate list is required")
 			}
 			if c.OutputDir != legacy.OutputDir || c.StateFile != legacy.StateFile || c.Login.Path != legacy.Login.Path {
@@ -75,7 +72,7 @@ func TestYAMLStandaloneLifecycle(t *testing.T) {
 	}
 }
 
-func TestJSONToYAMLPreservesBaseline(t *testing.T) {
+func TestEmbeddedParsingPreservesBaseline(t *testing.T) {
 	c := testConfig(t)
 	runOK(t, c)
 	originalScope := scopeID(c)
@@ -83,15 +80,12 @@ func TestJSONToYAMLPreservesBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.Existence.ListFile = ""
 	c.Existence.Files = entries
 	b, err := yaml.Marshal(c)
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(filepath.Dir(c.OutputDir), "config.yaml")
-	put(t, path, string(b))
-	c, err = LoadConfig(path)
+	c, err = ParseConfig(b, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,4 +160,71 @@ func TestYAMLDisabledChecksNeedNoList(t *testing.T) {
 		t.Fatal(err)
 	}
 	runOK(t, c)
+}
+
+func TestJSONConfigurationRemoved(t *testing.T) {
+	jsonConfig := `{"output_dir":"output","md5":{"enabled":false},"login":{"enabled":false},"existence":{"enabled":false}}`
+	for _, ext := range []string{".json", ".yaml", ".yml"} {
+		path := filepath.Join(t.TempDir(), "config"+ext)
+		put(t, path, jsonConfig)
+		if _, err := LoadConfig(path); err == nil {
+			t.Fatalf("accepted JSON configuration as %s", ext)
+		}
+	}
+	if _, err := ParseConfig([]byte(jsonConfig), t.TempDir()); err == nil {
+		t.Fatal("accepted embedded JSON configuration")
+	}
+	if err := ValidateEmbeddedYAML([]byte(jsonConfig), "linux"); err == nil {
+		t.Fatal("builder accepted JSON configuration")
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	put(t, path, inlineYAML)
+	if _, err := LoadConfig(path); err == nil {
+		t.Fatal("accepted obsolete .json configuration filename")
+	}
+}
+
+func TestEmbeddedRelativePathsUseDeploymentDirectory(t *testing.T) {
+	data := []byte(strings.Replace(inlineYAML, "  path: login.jsonl", "  path: login.jsonl\n  last_command: tools/last", 1))
+	for _, dir := range []string{filepath.Join(t.TempDir(), "B"), filepath.Join(t.TempDir(), "C")} {
+		c, err := ParseConfig(data, dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.OutputDir != filepath.Join(dir, "output") || c.StateFile != filepath.Join(dir, "output", "state", "md5.json") || c.MD5.Paths[0] != filepath.Join(dir, "watched") || c.Login.Path != filepath.Join(dir, "login.jsonl") || c.Login.LastCommand != filepath.Join(dir, "tools", "last") {
+			t.Fatalf("incorrect node-relative resolution: %+v", c)
+		}
+		checks, err := loadChecks(c.Existence)
+		if err != nil || checks[0].Path != filepath.Join(dir, "watched", "app.conf") {
+			t.Fatalf("checks not relative to deployment directory: %+v, %v", checks, err)
+		}
+	}
+}
+
+func TestBuildValidationUsesTargetOSWithoutFilesystem(t *testing.T) {
+	linux := "output_dir: /usr/local/anqu\nmd5:\n  paths: [/nonexistent-target-node/etc/app.conf]\nlogin:\n  path: /nonexistent-target-node/var/log/wtmp\nexistence:\n  base_dir: /nonexistent-target-node/etc\n  files:\n    - path: app.conf\n"
+	windows := "output_dir: C:/anqu/output\nmd5:\n  paths: [C:/nonexistent-target-node/app.conf]\nlogin:\n  enabled: false\nexistence:\n  base_dir: C:/nonexistent-target-node\n  files:\n    - path: app.conf\n"
+	for _, tc := range []struct {
+		name, os, data string
+		valid          bool
+	}{
+		{"Linux paths on any build host", "linux", linux, true},
+		{"Windows paths on any build host", "windows", windows, true},
+		{"runtime-relative paths", "linux", inlineYAML, true},
+		{"Windows rooted path rejected", "windows", linux, false},
+		{"unknown target OS", "invalid", linux, false},
+		{"excluded MD5 root", "linux", strings.Replace(linux, "/nonexistent-target-node/etc/app.conf", "/usr/local/anqu/config.yaml", 1), false},
+		{"relative check escapes", "linux", strings.Replace(linux, "path: app.conf", "path: ../escape", 1), false},
+		{"Windows duplicate case-insensitive path", "windows", windows + "    - path: APP.CONF\n", false},
+		{"Linux distinct case-sensitive paths", "linux", linux + "    - path: APP.CONF\n", true},
+		{"Windows drive-relative path rejected", "windows", strings.Replace(windows, "C:/anqu/output", "C:output", 1), false},
+		{"removed list_file", "linux", linux + "  list_file: files.json\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateEmbeddedYAML([]byte(tc.data), tc.os)
+			if (err == nil) != tc.valid {
+				t.Fatalf("valid=%t got err=%v", tc.valid, err)
+			}
+		})
+	}
 }
