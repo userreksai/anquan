@@ -1,29 +1,26 @@
-# 构建输入：在项目根目录执行以下命令，将节点程序输出到 demo 目录：
+# Linux 构建并单次执行：
 # go run ./cmd/anqu-build -config ./demo/config.yaml -output ./demo/anqu -goos linux -goarch amd64
-# 在 Linux 上执行 ./demo/anqu。相对路径以程序所在目录为基准，因此读取 demo 中的演示数据。
-# 节点程序不会读取此 YAML；修改配置后需要重新构建。
+# ./demo/anqu -once
+# Windows 演示可将目标改为 -goos windows，输出改为 ./demo/anqu.exe。
+# 相对路径以生成的程序所在目录为基准；不启用 Linux 专用进程/journal 采集。
 output_dir: output
 state_file: state/md5.json
 timezone: Asia/Shanghai
 
-md5:
-  enabled: true
-  paths:
+FilesMonitoring:
+  dir:
     - watched
-  recursive: true
-  exclude_paths: []
 
 login:
   enabled: true
   source: jsonl
   path: login.jsonl
-  last_command: last
   timeout_seconds: 10
   max_records: 1000
 
-existence:
-  enabled: true
-  base_dir: watched
-  files:
-    - path: app.conf
-      type: file
+server: []
+
+setup:
+  logs: output/logs/时间anquan.log
+  prom: output/snapshots/时间process_monitor.prom
+  interval_seconds: 300

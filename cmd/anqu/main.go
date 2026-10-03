@@ -1,30 +1,35 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 
 	"anqu/internal/audit"
 	"anqu/internal/sealed"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, sealed.Config, os.Executable))
 }
 
 // Agent nodes have no external configuration input or configuration-export API.
-// Detailed audit findings remain in the report files, as requested by the operator.
+// Each run writes local logs and stdout for the service journal.
 func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), executable func() (string, error)) int {
 	flags := flag.NewFlagSet("anqu", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	showVersion := flags.Bool("version", false, "print program version")
+	service := flags.Bool("service", false, "run continuously using setup.interval_seconds")
+	once := flags.Bool("once", false, "run one check (default)")
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: anqu [-version]\nRuns one audit using configuration embedded on the build server.")
+		fmt.Fprintln(stderr, "Usage: anqu [-once | -service] [-version]\nUses configuration embedded on the build server; -service checks immediately and periodically.")
 	}
 	if err := flags.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -39,6 +44,10 @@ func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), e
 	if *showVersion {
 		fmt.Fprintln(stdout, "anqu "+version)
 		return 0
+	}
+	if *once && *service {
+		fmt.Fprintln(stderr, "-once and -service cannot be combined")
+		return 1
 	}
 	data, err := load()
 	if err != nil {
@@ -59,7 +68,20 @@ func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), e
 	// Erase the decrypted source buffer as soon as parsing completes. Parsed Go
 	// values necessarily remain in process memory while the audit runs.
 	clear(data)
-	report, _, err := audit.Run(cfg)
+	if *service {
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		if err := audit.Serve(ctx, cfg, stdout, version); err != nil {
+			fmt.Fprintln(stderr, "service failed:", err)
+			return 1
+		}
+		return 0
+	}
+	if err := audit.LifecycleLog(cfg, stdout, "agent_started", map[string]any{"version": version, "pid": os.Getpid(), "mode": "once"}); err != nil {
+		fmt.Fprintln(stderr, "cannot write startup log:", err)
+		return 1
+	}
+	report, _, err := audit.RunWithWriter(cfg, stdout)
 	if err != nil {
 		fmt.Fprintln(stderr, "audit could not complete; check output access and task status")
 		return 1
@@ -68,7 +90,7 @@ func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), e
 		fmt.Fprintf(stderr, "audit collection failed (%d errors); see generated report\n", len(report.Errors))
 		return 1
 	}
-	if len(report.MD5.Changes) > 0 || report.Existence.Missing > 0 || report.Existence.TypeMismatch > 0 {
+	if len(report.Alerts) > 0 {
 		return 2
 	}
 	return 0

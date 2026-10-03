@@ -1,284 +1,271 @@
-# Anqu：文件与登录巡检（v0.3.0）
+# Anqu 安全检测 Agent（v0.4.0）
 
-按配置执行一次巡检：计算文件 MD5 并记录变化、读取最近一条登录记录、检查清单中的文件或目录。每次生成 JSON 汇总和 Prometheus / node_exporter Textfile Collector 格式的 `.prom` 文件。
+Anqu 在 Linux 节点持续检查文件 MD5、文件增删和进程变化，并逐条记录成功的 SSH 登录。服务启动时记录当前时间，每轮输出当前主机的完整检测结果、告警、JSON 报告和一份带采集时间的 Prometheus 文件。运行日志按北京时间零点切换文件。
 
-目标运行环境为 Linux。**A 服务器保留 YAML 和源码，构建时加密内置配置；B/C 节点只接收并运行生成的程序，不读取外部配置文件。** 修改 YAML 后重新构建，可用于另一台或一组路径相同的节点。JSON 配置和独立文件清单入口已取消，JSON 报告、JSON 基线与 JSONL 登录日志保留。
+本目录是 [anquan Agent](https://github.com/userreksai/anquan)。Agent 通过可配置的 UDP 接口向 [Master 主控](https://github.com/userreksai/anquan-server-master) 上报，默认关闭联网。详细需求对应关系见 [需求与实现说明](docs/需求与实现说明.md)，字段约定见 [Agent / Master 协议](docs/agent-master-protocol.md)。
 
-配置加密采用 AES-256-GCM，每次构建生成随机密钥和 nonce；构建时去除 Go 调试符号和构建路径。这样减少配置明文直接暴露，但**不能保证无法反编译或提取配置**：独立程序必须能自行解密，有 root 权限或能分析程序/内存的人仍可能恢复信息。按本次需求，报告和指标继续保留真实路径，基线也包含监控路径。完整功能边界见 [需求与实现说明](docs/需求与实现说明.md)。
+配套主控与 Vue 前端的安装、端口、默认登录和密码重置见 [安全中心主控部署](docs/主控部署.md)。
 
-## 1. A 服务器：配置并构建
+沿用内置加密配置部署方式：A 构建机保存 YAML 和源码，B/C 节点只部署生成的程序。节点不读取旁边的配置文件；变更配置后在 A 重新构建并替换程序。AES-256-GCM 内置配置减少明文分发，报告和基线保留真实路径；本机管理员仍可能从程序或内存恢复配置。
 
-需要 Git、Go 1.22 或更新版本。首次构建会由 Go 下载 YAML 解析依赖。在 A 上执行：
+## 构建和快速验证
+
+构建机需要 Go 1.22 或更新版本。首次构建会下载 `go.yaml.in/yaml/v3` 依赖。
 
 ```sh
 git clone https://github.com/userreksai/anquan.git
 cd anquan
-
-# 仅首次复制模板；已有 config.yaml 时不覆盖
-if [ ! -e config.yaml ]; then
-  cp configs/config.example.yaml config.yaml
-fi
+# 已有私有配置时不要覆盖。
+if [ ! -e config.yaml ]; then cp configs/config.example.yaml config.yaml; fi
 chmod 0600 config.yaml
 vi config.yaml
 
 go test ./...
 go vet ./...
-
-# 默认读取运行构建命令时当前目录下的 config.yaml
-go run ./cmd/anqu-build -output ./dist/anqu-linux-amd64 -goos linux -goarch amd64
-
-# ARM64 节点改用以下命令
-go run ./cmd/anqu-build -output ./dist/anqu-linux-arm64 -goos linux -goarch arm64
+go run ./cmd/anqu-build -config ./config.yaml -output ./dist/anqu-linux-amd64 -goos linux -goarch amd64
+# ARM64：将输出名和 -goarch 改为 anqu-linux-arm64 / arm64。
 ```
 
-模板内填写的是 **B/C 节点上的路径**，不是 A 的路径。构建工具严格校验配置结构、时区、路径规则和清单格式，不要求 A 存在这些被监控文件，也不提前执行巡检。示例中的 `/etc/crontab` 在目标节点不存在时请替换或移除。
+配置中的路径属于目标节点，构建机不必存在这些路径。普通 `go build ./cmd/anqu` 不会嵌入配置；部署程序必须由 `anqu-build` 生成。构建参数包括 `-config`、`-output`、`-goos`、`-goarch` 和 `-go`。默认配置是当前工作目录 `config.yaml`，默认目标系统是 Linux。
 
-构建工具参数：
-
-| 参数 | 用途 |
-|---|---|
-| `-config` | YAML 输入路径，默认当前工作目录的 `config.yaml`；支持 `.yaml` / `.yml` |
-| `-output` | 生成的节点程序路径，例如 `./dist/anqu-linux-amd64` |
-| `-goos` | 目标系统，默认 `linux` |
-| `-goarch` | 目标 CPU 架构，默认构建工具所在主机架构；建议显式指定 `amd64` 或 `arm64` |
-| `-go` | 用于编译的 Go 可执行文件，默认 `go` |
-
-构建工具通过 Go overlay 内置加密数据，临时目录不保存配置明文；使用独立的临时 Go 构建缓存并在结束后清理。A 上的原始 YAML 仍保留，供以后修改。私有 `config.yaml` / `config.yml` 已加入根目录 `.gitignore`，不要提交真实配置或将其放进节点发布包。
-
-发布包只提供源码和构建工具，不提供含通用真实配置的节点程序。使用构建工具包时，仍需在 A 安装 Go，进入随包源码根目录，准备 `config.yaml` 后运行 `./anqu-build -output ./dist/anqu-linux-amd64 -goos linux -goarch amd64`。普通 `go build ./cmd/anqu` 不会嵌入配置，生成物不能用于巡检。
-
-演示（以下适用于 Linux amd64）：
+本地演示使用相对路径、JSONL 模拟登录及独立输出目录，不需要系统日志或进程权限：
 
 ```sh
 go run ./cmd/anqu-build -config ./demo/config.yaml -output ./demo/anqu -goos linux -goarch amd64
-./demo/anqu
+./demo/anqu -once
+# 修改 demo/watched/app.conf 后再执行，查看 modified；第三次无修改则恢复 unchanged。
 ```
 
-程序所在目录为 `demo`，因此读取该目录内的测试文件与模拟 JSONL 登录记录，结果位于 `demo/output/`。修改 `demo/watched/app.conf` 后再运行，可看到 `modified`；再运行一次，本轮变化数归零，累计变化数保留。默认运行不打印摘要，用报告和退出码查看结果。
+Windows 开发演示可使用 `-goos windows -output ./demo/anqu.exe`。生产进程监控依赖 Linux `/proc`。演示登录记录是固定测试数据，JSONL 首轮读取其中尚未记录的条目。
 
-## 2. B/C 节点：只部署程序
+## 配置格式
 
-将 A 构建的对应架构程序传到节点。可以同时传入 `deploy/anqu.service`、`deploy/anqu.timer` 用于定时执行；**不用传 YAML、源码或构建工具**。假定程序已放在节点当前目录：
+完整中文模板见 [config.example.yaml](configs/config.example.yaml)。字段区分大小写：`FilesMonitoring`、`ProcessMonitoring`、`Process`、`fils` 均按以下拼写。每条路径/命令规则是一个 YAML 字符串；使用空格缩进。未知字段、非法 MD5、重复规则及多个 YAML 文档会被拒绝。
+
+```yaml
+output_dir: /usr/local/anqu
+state_file: state/md5.json
+timezone: Asia/Shanghai
+
+FilesMonitoring:
+  fils:
+    - /etc/ssh/sshd_config|/etc/ssh/ssh_config
+    - /etc/ssh/sshrc
+    - /etc/hosts.allow
+  dir:
+    - /etc/cron.d/
+  search:
+    - authorized_keys,/root|/home|/var
+    - id_rsa,/root|/home|/var
+
+ProcessMonitoring:
+  exists:
+    - '/usr/sbin/sshd -D|/usr/sbin/ssh -D'
+  Process:
+    whitelist:
+      - /usr/sbin/sshd -D
+
+login:
+  enabled: true
+  source: journal
+  journal_command: journalctl
+  initial_lookback_hours: 24
+  timeout_seconds: 10
+  max_records: 1000
+
+server: []
+# Master 接收端就绪后替换为：
+# server:
+#   - 172.22.0.100:55555
+
+setup:
+  logs: /var/log/时间anquan.log
+  prom: /var/lib/node_exporter/textfile_collector/时间process_monitor.prom
+  interval_seconds: 300
+```
+
+这是路径示例。不同发行版可能没有 `sshrc`、`hosts.allow` 等文件：保留它们表示必须检查，缺失会告警；其他可正常读取的文件仍建立基线，缺失路径后来出现时报告新增。不需要检查时从配置移除。不存在的搜索根目录同样记录，没有匹配文件时记录 `not_found`。
+
+`FilesMonitoring` 或 `ProcessMonitoring` 整段省略可关闭对应模块；`login.enabled: false` 关闭登录采集。新格式自动关闭旧 `md5`、`existence` 默认模块，旧格式仍兼容。不要用空的顶层监控段代替省略。
+
+相对路径以节点可执行程序所在目录为基准，`state_file` 相对于 `output_dir`。路径不展开 shell 变量、`~` 或通配符。`server` 接受 IP 和端口，IPv6 写作 `[2001:db8::1]:55555`。`interval_seconds` 默认 300，范围 1–86400，仅用于 `-service` 模式。
+
+### 文件规则和多对多 MD5
+
+| 配置 | 检测范围 |
+|---|---|
+| `fils: [路径1\|路径2[,MD5...]]` | 每个给定文件；路径是目录时递归处理目录内普通文件 |
+| `dir: [目录1\|目录2[,MD5...]]` | 递归处理目录内所有普通文件 |
+| `search: [文件名,目录1\|目录2[,MD5...]]` | 在所有根目录递归搜索精确文件名，比较每个找到的文件 |
+
+不提供 MD5 时，首次完整扫描记录初始 MD5，不把既有文件当成新增。以后比较上一次成功扫描，记录 `added`、`modified`、`deleted`，并在报告和日志落盘后更新基线。因此一次修改会在发现的那一轮告警；随后内容不变则为 `unchanged`。
+
+提供 MD5 时，后面的所有值组成同一规则的允许集合，每个文件都必须匹配其中任意一个值。不会按位置把路径和 MD5 配对，也不要求每个允许值都用到。例如以下两个文件允许三个内容版本：
+
+```yaml
+FilesMonitoring:
+  fils:
+    - /opt/app/a.conf|/opt/app/b.conf,d41d8cd98f00b204e9800998ecf8427e,900150983cd24fb0d6963f7d28e17f72,5d41402abc4b2a76b9719d911017c592
+```
+
+以上哈希是格式演示，部署时用实际 `md5sum` 结果替换。MD5 必须是 32 位十六进制，不能填写 `md51`。两个文件分别命中任意允许值才正常；只有一个命中时，日志同时保留正常文件、异常文件的当前 MD5、允许值和规则命中统计，并为异常文件产生 `md5_mismatch`。两个文件内容相同、都匹配同一个允许值，也属于正常。
+
+固定允许集合不会被自动学习覆盖；不匹配会在每轮重复告警。即使配置固定 MD5，目录成员的新增和删除仍与上轮清单比较并产生告警。配置路径缺失产生 `missing`，搜索无结果产生 `not_found`。扫描权限不足、读取失败或文件在计算期间变化会使模块失败，保留旧基线，避免把扫描不完整误判为删除。
+
+文件重命名记为删除加新增。只改变属主/权限/时间戳不会构成内容变化。符号链接和特殊文件不计算 MD5，不进入目录链接；已跟踪文件被替换成链接/特殊文件时显式报错。Agent 自己的输出、日志和状态路径自动排除。MD5 用于本次要求的内容比较，不承担数字签名或防碰撞证明。
+
+### 进程规则
+
+`exists` 每行是一个独立必须满足的规则，`|` 分隔多个系统适配命令，任意一个运行即满足该行。允许两个以上备选。命令经空白归一化后整行精确比较，`/usr/sbin/sshd -D-extra` 不会匹配 `/usr/sbin/sshd -D`。请按目标主机 `/proc/<PID>/cmdline` 的实际命令填写；仅文件存在不等于进程正在运行。
+
+`Process: {}` 开启整个进程列表的滚动监控。首次建立列表；之后比较完整命令和实例数量，因此相同命令由两个实例变一个也会报告 `deleted`。白名单保留在当前清单和日志中，只抑制列表增删告警，仍参与 `exists` 检查。省略 `Process` 时只检查 `exists`。
+
+读取 `/proc` 不调用 shell 或 `ps`，排除当前 Agent 的 PID。没有 argv 的内核线程或僵尸进程以 `[comm]` 记录。扫描时进程正常退出会跳过；权限或读取错误使本轮进程模块失败并保留基线。
+
+## 每次成功 SSH 登录
+
+新模式默认 `login.source: journal`，通过 `journalctl` 读取 sshd/sshd-session 的成功认证事件，记录每个事件的时间、用户、来源 IP、认证方式及可获得的终端。SSH 非交互命令同样可以从成功认证日志取得记录。认证行通常没有终端，此时明确记为 `N/A`，不猜测终端。
+
+首次从 `initial_lookback_hours` 指定的窗口开始，默认 24 小时；之后持久化 journal 游标。`max_records` 默认 1000，是每轮处理日志事件的页上限，不是只保留最后 1000 次登录；有积压时 `pending` 为真，后续轮次从下一事件继续。登录列表逐条写入 `ssh_login` 日志、JSON 和可选 UDP；`login.record` 同时保留最近一次登录。
+
+| 数据源 | 配置和边界 |
+|---|---|
+| `journal` | 需要可用的 `journalctl` 和读系统日志权限；日志保留周期必须覆盖 Agent 停机时间 |
+| `authlog` | `path: /var/log/auth.log` 或 `/var/log/secure`；解析 sshd 成功认证行，支持 RFC3339 或传统 syslog 时间 |
+| `jsonl` | 自定义每行一个成功登录对象；按记录去重并分页，首次读取文件内全部尚未记录的条目 |
+| `wtmp` | `path: /var/log/wtmp`、`last_command: last`；需要支持 `--time-format iso` 的 util-linux last；只覆盖系统实际写入 wtmp 的会话 |
+
+`authlog` 保存文件前缀和字节偏移，并尝试从保留的未压缩 `path.*` 轮转文件续读；不读取 `.gz`、`.xz`、`.bz2`。初次只读取当前日志，丢失、截断或压缩掉续读所需文件会报错，不能保证补回已删除的事件。传统 syslog 没有年份和时区，按目标节点本地时区解释并处理跨年。`wtmp` 没有记录的非交互 SSH 无法靠它恢复，因此需要逐次 SSH 记录时使用 journal 或完整 authlog。
+
+JSONL 示例：
+
+```json
+{"source_ip":"192.0.2.10","login_time":"2026-10-02T10:00:00+08:00","user":"ops","terminal":"pts/0"}
+```
+
+时间必须包含时区，终端未知填 `N/A`；可额外提供稳定 `id` 和 `method`。格式错误或源读取失败时，不推进登录状态。切换登录源应先备份对应 `.logins` 状态，防止错用原游标。
+
+## 日志、报告和 Prometheus
+
+服务启动立即输出包含当前北京时间、主机名的启动记录；每轮有 `scan_started`、各模块完整结果、独立 `alert` / `ssh_login` 事件和 `scan_complete`。正常结果也写入日志，包含文件实际 MD5、规则匹配情况和进程清单。停止服务时记录停止事件。日志同时写标准输出和每日 JSONL 文件，systemd 可从 journal 查看。
+
+默认或模板配置输出：
+
+| 路径 | 内容 |
+|---|---|
+| `/var/log/20261002anquan.log` | 北京时间当天的 JSONL 日志，零点自动换文件 |
+| `/usr/local/anqu/20261002_100000.123456789+0800.json` | 单轮完整检测报告 |
+| `/var/lib/node_exporter/textfile_collector/20261002_100000.123456789+0800process_monitor.prom` | 单轮指标快照；每次执行都会生成新文件 |
+| `/usr/local/anqu/textfile/anqu.prom` | 固定文件名的最新状态指标 |
+| `/usr/local/anqu/state/md5.json.files` | 文件 MD5 和成员清单滚动基线 |
+| `/usr/local/anqu/state/md5.json.processes` | 进程列表滚动基线 |
+| `/usr/local/anqu/state/md5.json.logins` | 登录游标及已记录状态 |
+
+`setup.logs` 中的 `时间` 或 `{date}` 替换为北京时间 `YYYYMMDD`，禁止 `{time}`，始终按北京时间日切。`setup.prom` 的 `时间` / `{time}` 替换为含纳秒的采集时间；即使仅写 `{date}` 也自动补足本轮时间，避免覆盖。没有占位符时自动添加日期或采集时间前缀。占位符只允许出现在文件名；配置目录时会补默认文件名。`timezone` 可控制报告显示，但不改变日志零点切割规则。
+
+每轮快照使用 `anqu_snapshot_` 指标前缀，并给每条样本增加 `host` 和 `run_id` 标签，因此同一 textfile 目录保留多轮快照不会产生相同标签集合的重复样本。最新状态继续使用 `anqu_` 前缀。生产告警通常查询最新状态：
+
+```text
+--collector.textfile.directory=/usr/local/anqu/textfile
+```
+
+若要采集所有历史快照，则让 node_exporter 读取 `setup.prom` 所在目录。每轮都会增加时间序列，历史文件没有自动清理，需要明确保留期限。可将 `setup.prom` 设为 `/usr/local/anqu/textfile/时间process_monitor.prom`，使同一目录同时采集最新状态和快照；两种前缀互不冲突。不要把旧版本中没有 `run_id` 的历史 `.prom` 混入此目录。
+
+常用最新状态指标：
+
+| 指标 | 含义 |
+|---|---|
+| `anqu_collection_success` / `anqu_collection_errors` | 本轮采集状态和错误数量 |
+| `anqu_run_timestamp_seconds` | 最近一轮完成时间 |
+| `anqu_module_enabled{module}` / `anqu_module_success{module}` | 各模块开启和成功状态 |
+| `anqu_alerts` | 本轮告警总数 |
+| `anqu_files_check{path,rule,mode,status}` | 各文件校验状态 |
+| `anqu_files_change{path,kind}` | 本轮文件增删改 |
+| `anqu_process_exists{rule}` | 某组备选命令是否至少有一个运行 |
+| `anqu_process_instances{command,whitelisted}` | 完整命令对应实例数量 |
+| `anqu_ssh_logins_new` / `anqu_ssh_logins_pending` | 本轮新增登录数和积压标记 |
+| `anqu_last_login_info` / `anqu_last_login_timestamp_seconds` | 最近登录信息和时间 |
+
+`collection_success: true` 表示完成采集，不表示没有异常；MD5 不匹配或进程缺失属于有效检测结果。查看报告中的 `alerts` 和模块明细。失败模块保留错误状态，避免将失败当成健康。报告默认权限 0640，基线 0600，指标 0644，日志 0640。
+
+## UDP 主控接口
+
+`server: []` 不联网，所有检测和通知结果保存在本地。填写 IP:端口后，Agent 启动时在首轮采集前立即向每个地址发送 `heartbeat`，`-service` 常驻运行期间每 30 秒独立上报心跳，耗时扫描不阻塞心跳。每轮采集完成后发送一个 `scan_summary`，以及逐条 `alert`、`ssh_login` JSON 数据报：
+
+```json
+{"version":1,"event_id":"唯一事件摘要","ip":"172.22.0.101","host":"node-a","time":"2026-10-02T10:00:00+08:00","type":"alert","data":{"module":"files","kind":"missing","target":"/etc/ssh/sshrc","message":"configured file or directory does not exist"}}
+```
+
+主控 UDP 默认端口为 `55555`，使用内网通信，无需认证或加密，开通相应 Agent 到主控的网络即可。`ip` 默认取连接当前主控时的本地出口地址；可增加顶层 `agent_ip: 172.22.0.101` 固定机器主键，适用于 NAT、多网卡或多个主控路径不同的情况。不同机器必须配置不同的 IP。主控收到首次上报即自动创建机器；连续超过 90 秒没有有效上报时显示“异常离线”，再次上报立即恢复“在线”。心跳只更新机器状态，不进入事件历史，不触发 webhook。旧 Agent 没有独立心跳时，仍按扫描周期的三倍（最低 120 秒）判断离线，默认 300 秒扫描对应 900 秒。
+
+每轮 `scan_summary` 包含巡检间隔 `interval_seconds`，与心跳的 30 秒周期分别保存。文件告警的 `target` 是文件路径或搜索规则，`before` / `after` 保留前后 MD5；成功登录事件保留来源 `source_ip`、实际 `login_time` 和稳定 `id`，外层 `time` 同样使用登录发生时间。
+
+同一报文重复提交保持 `event_id`；具有稳定来源 ID 的登录跨扫描重读也保持事件 ID，主控可以按机器 IP 与事件 ID 去重。持续缺失等告警在不同扫描轮次分别记录。发送统计、实际上报的机器 IP 和错误写入本轮报告及日志。UDP 为尽力发送，发送成功只代表本机交给网络栈，没有主控确认或重传队列；完整信息仍以本地报告为准。完整 JSON 示例、兼容旧版的接收规则和投递边界见 [协议文档](docs/agent-master-protocol.md)。
+
+## 运行和 systemd 部署
+
+节点只需对应架构的 Agent，不需 Go 或 YAML。假定构建产物和部署单元已传到当前目录：
 
 ```sh
 sudo install -d -m 0755 /usr/local/anqu
 sudo install -m 0700 ./anqu-linux-amd64 /usr/local/anqu/anqu
-sudo /usr/local/anqu/anqu
-echo $?
+sudo /usr/local/anqu/anqu -once
+# 退出码 2 表示检测到告警；不等于程序未执行。
 ```
 
-节点程序只提供 `-help` 和 `-version`，没有 `-config`、`-check-config` 或导出配置命令，不读取旁边的 YAML/JSON，也不会输出完整配置。巡检完成默认安静退出，查看本轮 JSON、指标和退出码；采集或输出故障仍应结合任务日志排查。生成的节点程序默认权限 0700，仅所有者可读写执行；按上述命令由 root 安装后由 root 任务运行，这不限制 root 自身的检查能力。
+无参数和 `-once` 都执行一轮，并在采集前发送一次启动心跳。`-service` 启动常驻循环，启动心跳发送后立即执行首轮采集，并按 `setup.interval_seconds` 周期执行，不重叠执行；单轮超过周期时跳过无法及时执行的节拍。常驻模式另有独立的 30 秒心跳，不受扫描周期或耗时影响。`-help`、`-version` 用于查看帮助和版本；没有节点 `-config`、`-check-config` 或导出配置接口。
 
-需要给 C 使用时，在 A 修改 `config.yaml`，重新执行构建并下发新的程序；路径相同、架构兼容的节点也可以共用同一构建。目标节点不需要安装 Go；wtmp 模式仍需要兼容的 util-linux `last`。
-
-旧版本升级及节点遗留配置清理步骤见 [升级说明](docs/需求与实现说明.md#七已有服务器升级到内置配置)。
-
-## 3. A 上的 YAML 配置说明
-
-构建时默认读取当前工作目录的 `config.yaml`，也可用 `-config` 指定其他 YAML。配置采用 UTF-8，支持 BOM 和 `# 中文注释`；使用空格缩进，不用 Tab。未知字段、重复字段、多个 YAML 文档及错误清单会导致构建失败；不接受 JSON 配置和 `existence.list_file`。三个模块可分别设置 `enabled: false`。中文模板见 [config.example.yaml](configs/config.example.yaml)。
-
-| 字段 | 作用 / 默认值 |
-|---|---|
-| `output_dir` | 汇总输出目录，默认 `/usr/local/anqu` |
-| `state_file` | MD5 基线和累计计数，默认 `state/md5.json`；相对路径以 `output_dir` 为基准 |
-| `timezone` | 报告、文件名和登录时间的显示时区，默认 `Asia/Shanghai` |
-| `md5.paths` | 文件或目录列表；开启该模块时必填 |
-| `md5.recursive` | 是否扫描目录的全部子目录，默认 `true` |
-| `md5.exclude_paths` | 要排除的完整路径；目录会连同子目录排除，不是 glob 通配符 |
-| `login.source` | `wtmp`（默认）或 `jsonl` |
-| `login.path` | 登录数据路径，默认 `/var/log/wtmp` |
-| `login.last_command` | `wtmp` 模式使用的 util-linux `last` 命令，默认 `last`；可以填写可执行文件绝对路径 |
-| `login.timeout_seconds` | `last` 超时，默认 10 秒，允许 1–3600 |
-| `login.max_records` | `last` 最多读取的最近记录数量，默认 1000，允许 1–100000 |
-| `existence.files` | 直接在主配置中填写文件检查清单，每项包含 `path`、`type` |
-| `existence.base_dir` | 清单里相对路径的起始目录 |
-
-除 `state_file` 和清单内路径外，配置里的相对路径均相对于 **B/C 节点可执行程序所在目录**，不依赖 A 的构建路径或 B/C 启动命令时所在目录。`state_file` 相对于 `output_dir`，清单项相对于 `existence.base_dir`；绝对路径直接使用。`last_command` 为程序名时按进程 PATH 查找，不经过 shell，也不展开 `$变量`、`~` 或通配符。生产建议填写绝对路径。
-
-合并在主配置里的文件检查清单示例：
-
-```yaml
-existence:
-  enabled: true
-  base_dir: /etc
-  files:
-    - path: ssh/sshd_config
-      type: file
-    - path: ssh
-      type: directory
-    - path: /opt/app/config.yaml
-      type: file
-```
-
-当 `base_dir` 是 `/etc` 时，前两项对应 `/etc/ssh/sshd_config`、`/etc/ssh`；绝对路径直接使用。`type` 支持 `file`、`directory`、`any`，省略默认为 `file`。不允许重复路径和通过 `../` 越过 `base_dir` 的相对路径；目录以外的检查对象请明确写绝对路径。
-
-启用存在检查时，`existence.files` 至少要有一项；不使用此功能时设置 `existence.enabled: false`。在 `files` 清单中添加文件不会自动加入 MD5 监控，内容变化检查由 `md5.paths` 控制。
-
-旧配置应迁移到 A 的 YAML；把旧 `files.json` 条目移入 `existence.files`，删除 `existence.list_file`。保持实际 MD5 路径、排除、递归和输出/基线位置不变时可复用旧基线，不要删除 `state/md5.json`。从旧版本迁移相对路径时注意基准目录的变化，必要时改为绝对路径。配置变更必须重新构建并替换节点程序。
-
-## 4. MD5 判定规则
-
-- 首次完整扫描建立基线，不把现有文件当作新增。
-- 之后与**上一次成功完成的 MD5 扫描**比较，记录 `added`、`modified`、`deleted`，包含文件路径、原 MD5、新 MD5。
-- 每次成功扫描后更新基线。其他模块失败不阻止成功的 MD5 模块更新基线。
-- 任一 MD5 读取失败、扫描中发现文件发生变化、基线损坏或扫描范围改变，本轮 MD5 标记失败，保留旧基线，不输出误导性的零变化指标。
-- 已建立基线的监控路径消失，会记录 `missing_roots`，原有文件记录为删除。挂载目录临时不可用也可能表现为删除，需要结合挂载状态判断。
-- 按文件内容判断；仅权限、属主、时间戳变化，不算 MD5 内容变化。重命名按删除旧文件和新增新文件处理。
-- 跳过符号链接、设备、管道等非普通文件，汇总跳过数量；不递归进入符号链接目录。输出目录、基线和锁自动排除。
-
-在 A 修改监控路径、排除路径、递归选项或输出/状态位置并重新构建后，旧基线的扫描范围不再匹配，程序会报错。请停止定时任务、替换程序，将旧状态文件改名备份，然后运行以建立新基线。例如，以下在节点执行（新程序已传到当前目录）：
+推荐常驻服务：
 
 ```sh
-sudo systemctl stop anqu.timer
-sudo systemctl stop anqu.service
-sudo install -m 0700 ./anqu-linux-amd64 /usr/local/anqu/anqu
-sudo mv /usr/local/anqu/state/md5.json /usr/local/anqu/state/md5.backup.json
-sudo /usr/local/anqu/anqu
-sudo systemctl start anqu.timer
-```
-
-重新建立基线会重置累计变化计数。MD5 按本次需求用于内容变化检查；它不是数字签名或防碰撞的可信证明。第一版不提供经人工批准后才更新的固定可信基线模式。
-
-## 5. 登录记录
-
-### wtmp：默认方式
-
-程序执行：
-
-```sh
-last -w -i --time-format iso -n 1000 -f /var/log/wtmp
-```
-
-使用 util-linux 版本的 `last`，从最近记录开始，跳过重启等系统记录，取第一条用户登录记录，输出 `source_ip`、`login_time`、`user`、`terminal`。命令输出强制使用英文和 UTC，再转换成配置时区。IPv4、IPv6 均支持；本地登录或未记录 IP 时 `source_ip` 为空。
-
-目标系统必须实际写入 wtmp，且安装支持上述参数的 `last`；BusyBox/GNU acct/wtmpdb 等其他实现不保证兼容。只检查配置的一个 wtmp 文件和最近 `max_records` 条，不合并轮转文件。找到零条用户记录时输出 `record: null`、`anqu_login_found 0`；读取失败会标记错误。
-
-wtmp 反映的是系统记录的登录会话，通常能提供终端。没有分配终端的 SSH 命令等可能不写入 wtmp；如果需要覆盖它们，应由登录采集端写 JSONL。
-
-### JSONL：自定义登录日志
-
-把 `login.source` 改成 `jsonl`，`login.path` 改为实际文件，例如 `/var/log/anqu-login.jsonl`。每行一个 JSON 对象：
-
-```json
-{"source_ip":"192.0.2.10","login_time":"2026-10-01T10:00:00+08:00","user":"ops","terminal":"pts/0"}
-```
-
-`login_time` 必须是含时区的 RFC3339 时间；无分配终端时使用 `"terminal":"N/A"`；本地登录的 IP 可以为空字符串。日志应只包含成功登录记录。程序顺序读取整个文件，按登录时间选择最新的一条，而非假设最后一行最新；同一时刻以靠后的记录为准。空行忽略，每行最多 1 MiB。无效记录会使该模块失败，不把旧记录冒充最近登录；文件较大时应由外部日志轮转限制大小。
-
-附件 `anquan.sh.txt` 的原日志仅有时间、User、IP、Host，未写入终端，而且部分 IP 会被白名单过滤，因此无法从原文件完整恢复所有登录及终端。本版不直接解析该脚本旧日志，也不安装 SSH 登录钩子。可用 wtmp，或让现有登录采集端按上面的 JSONL 格式写入。
-
-## 6. 输出与 node_exporter
-
-每次执行，无论是否发现变化，都生成汇总。默认目录结构：
-
-```text
-/usr/local/anqu/
-├── anqu
-├── 20261001_100000.123456789+0800.json  # 按时间命名的完整汇总
-├── 20261001_100000.123456789+0800.prom  # 同一轮的指标归档
-├── state/
-│   ├── md5.json                      # 上次成功扫描的 MD5 与累计计数
-│   └── md5.json.lock                 # Linux flock 锁文件，保留文件是正常的
-└── textfile/
-    └── anqu.prom                    # 最新一轮，供 node_exporter 读取
-```
-
-JSON 内 `collection_success` 表示采集是否完成，不代表没有异常：文件变化、文件缺失或类型不匹配仍是有效采集结果。三个模块各有 `enabled`、`success` 和详细数据；错误放在 `errors` 数组中。
-
-节点目录没有需要读取的 `config.yaml` 或 `files.json`。报告、指标和基线保留真实文件路径以便排查，这些输出并未加密。查看最近一次 MD5 变化（需要安装 `jq`）：
-
-```sh
-report=$(ls -1t /usr/local/anqu/[0-9]*.json | head -n 1)
-jq '.md5.changes' "$report"
-cat /usr/local/anqu/textfile/anqu.prom
-```
-
-成功扫描后基线会更新，下一轮未再次变动则变化数为 0；需要追溯时查看之前的时间命名 JSON。
-
-给现有 node_exporter 增加参数：
-
-```sh
---collector.textfile.directory=/usr/local/anqu/textfile
-```
-
-**必须指向 `textfile` 子目录，不要直接采集 `/usr/local/anqu` 内的历史 `.prom` 文件**，否则不同批次的同名指标会重复。程序先写同目录临时文件，再替换最终文件；`.prom` 不使用样本时间戳第三列，时间采用普通指标数值。这遵循 [node_exporter Textfile Collector 说明](https://github.com/prometheus/node_exporter/blob/master/README.md#textfile-collector)。
-
-JSON 报告默认权限 0640，基线 0600，指标 0644，程序新建的输出目录 0755；请确保现有父目录也允许 node_exporter 用户访问。
-
-| 指标 | 含义 |
-|---|---|
-| `anqu_collection_success` | 全部启用模块本轮是否采集成功，1/0 |
-| `anqu_run_timestamp_seconds` | 最近一轮采集时间，Unix 秒 |
-| `anqu_run_duration_seconds` | 采集耗时，不含文件输出时间 |
-| `anqu_module_enabled{module}` / `anqu_module_success{module}` | 模块开启和成功状态 |
-| `anqu_collection_errors` | 本轮错误数量 |
-| `anqu_md5_files` / `anqu_md5_skipped` | 哈希文件数 / 跳过的非普通文件数 |
-| `anqu_md5_missing_roots` | 已建基线后消失的配置路径数 |
-| `anqu_md5_baseline_created` | 本轮是否建立初始基线 |
-| `anqu_md5_changes{kind}` | 本轮新增、修改、删除数量 |
-| `anqu_md5_changes_total{kind}` | 持久化累计变化数，重建基线时重置 |
-| `anqu_md5_last_change_timestamp_seconds` | 最近发现变化的时间，没有变化时为 0 |
-| `anqu_md5_file_change{path,kind}` | 本轮变化的文件明细，值为 1 |
-| `anqu_login_found` | 当前数据源是否找到用户登录记录 |
-| `anqu_last_login_timestamp_seconds` | 最近一次登录时间，Unix 秒 |
-| `anqu_last_login_info{user,source_ip,terminal}` | 最近一次登录信息，值为 1 |
-| `anqu_existence_checked` / `anqu_existence_missing` / `anqu_existence_type_mismatch` | 检查数 / 缺失数 / 类型不符数 |
-| `anqu_file_check_success{path,type}` | 单个检查能否完成 |
-| `anqu_file_exists{path,type}` | 是否存在，1/0；不可读时不输出此样本 |
-| `anqu_file_matches{path,type}` | 是否存在且类型符合，1/0 |
-
-MD5 或登录模块失败时，省略该模块的结果指标，保留失败状态；禁用模块通过 `anqu_module_enabled=0` 区分。文件检查部分失败时仍保留其他文件的有效结果。
-
-PromQL 示例（示例采用五分钟运行一次）：
-
-```promql
-# 采集失败
-anqu_collection_success == 0
-
-# 超过十五分钟没有更新；首次尚未生成指标时还需配置 absent 告警
-time() - anqu_run_timestamp_seconds > 900
-
-# 最近十分钟观察到文件变化：即使某一轮本轮变化数被覆盖，累计计数仍可保留信息
-sum by (instance) (increase(anqu_md5_changes_total[10m])) > 0
-
-# 清单中的文件/目录缺失或类型不符
-anqu_file_matches == 0
-```
-
-累计计数反映定时扫描观察到的变化，不能发现两次扫描之间修改后又恢复的瞬时变化。发生时间和前后 MD5 以归档 JSON 为准。
-
-## 7. 定时运行和退出码
-
-安装随附 systemd 单元：
-
-```sh
+# 从旧 timer 升级时先停止它；已有配置和基线应保留备份。
+sudo systemctl disable --now anqu.timer 2>/dev/null || true
+sudo systemctl stop anqu.service 2>/dev/null || true
 sudo install -m 0644 deploy/anqu.service /etc/systemd/system/anqu.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now anqu.service
+sudo systemctl status anqu.service
+sudo journalctl -u anqu.service -n 50 --no-pager
+```
+
+服务单元使用 `Type=simple`、`Restart=on-failure`、`RestartSec=5`。常驻服务记录单轮错误并继续后续巡检；正常停止使用 `systemctl stop anqu.service`。
+
+如使用外部调度，改用附带的可选 oneshot/timer，不同时启用常驻服务：
+
+```sh
+sudo systemctl disable --now anqu.service
+sudo install -m 0644 deploy/anqu-oneshot.service /etc/systemd/system/anqu-oneshot.service
 sudo install -m 0644 deploy/anqu.timer /etc/systemd/system/anqu.timer
 sudo systemctl daemon-reload
 sudo systemctl enable --now anqu.timer
-sudo systemctl start anqu.service
-sudo systemctl status anqu.timer
-journalctl -u anqu.service --no-pager -n 30
+sudo systemctl start anqu-oneshot.service
 ```
 
-默认开机一分钟后执行，之后每次执行结束五分钟后再执行；`systemd` 的时间精度设置可能带来少量延迟。每轮使用程序内置配置，不读取节点配置文件。执行周期由 timer 控制，不在 YAML 中设置。也可以自行用 cron 定时调用，二者选一个即可。附带服务设置 `LimitCORE=0`，减少意外生成 core dump，不能阻止 root 检查程序或内存。
+timer 在开机一分钟后启动，每次任务结束五分钟后再运行。其周期由 timer 决定，不读取 `interval_seconds`。oneshot 的 `SuccessExitStatus=2` 接受正常发现告警的退出状态。单次运行结束后不再发送心跳，主控会在超过 90 秒没有上报时显示异常离线；需要持续自动在线状态时使用上面的常驻服务。
 
-| 退出码 | 含义 |
+| 单次退出码 | 含义 |
 |---|---|
-| `0` | 采集成功，无变化或清单异常；首次正常建立基线也为 0 |
-| `1` | 命令行参数、配置、采集、基线、锁或输出错误 |
-| `2` | 正常完成采集，但发现 MD5 变化、文件缺失或类型不匹配 |
+| `0` | 完成采集且没有告警；初次完整建基线也可为 0 |
+| `1` | 参数、配置、采集、输出、状态保存或通知发送出现错误 |
+| `2` | 完成采集并发现文件/进程等告警 |
 
-systemd 已设置 `SuccessExitStatus=2`，避免把有效的异常发现当作服务执行失败。Linux 使用非阻塞文件锁避免相同基线的任务并发；进程退出自动释放锁，不要删除正在使用的锁文件。非 Linux 仅供开发演示，使用目录锁；异常退出后需确认没有在运行的进程，再手动清理对应锁目录。
+## 基线、升级和验证
 
-报告全部发布完成后才提交 MD5 基线。多个文件不是一次事务：如果程序在发布与提交之间崩溃，下次可能重复记录同一变化，以保留信息为优先。输出目录不可用或内置配置加载失败时可能无法生成新错误指标，请同时监控进程退出、任务日志和指标更新时间。
+文件/进程基线和登录游标只在结果报告及详细日志成功落盘后提交。不完整扫描保留旧状态；一个模块失败不阻止其他成功模块产出结果。多个输出文件和状态不是同一事务，崩溃可能导致下轮重复记录，优先避免未记录就消费变化。
 
-程序保留全部历史报告，不自动删除；请按实际保留周期安排归档。一个输出目录和一份基线用于一个配置实例，避免不同配置共用最新指标文件。
+文件监控范围、固定 MD5 集合或输出/状态位置变更后，旧 `.files` 基线会拒绝复用；进程白名单变更后 `.processes` 也需重建；切换登录源需处理 `.logins`。升级程序时先停止服务，备份相应状态文件后再建立新基线。只移动需要重建的状态，避免丢失其他模块历史，例如：
 
-## 8. 验证范围
+```sh
+sudo systemctl stop anqu.service
+sudo cp -a /usr/local/anqu/state /usr/local/anqu/state.backup-$(date +%Y%m%d%H%M%S)
+# 仅在修改文件监控规则、需要明确重建时执行：
+sudo mv /usr/local/anqu/state/md5.json.files /usr/local/anqu/state/md5.json.files.previous
+sudo install -m 0700 ./anqu-linux-amd64 /usr/local/anqu/anqu
+sudo systemctl start anqu.service
+```
 
-已通过 34 个顶层测试及其子测试，覆盖 MD5 基线与增删改、递归/排除、输出失败、清单缺失/类型不符、登录解析、指标、模块隔离、并发锁、YAML 严格校验、拒绝 JSON 配置和旧清单入口、加密载荷完整性及节点相对路径。Windows 集成验证已确认：只复制程序即可运行、不读取旁边的配置文件、修改 A 的 YAML 重新构建后 C 使用新配置而 B 保持原配置。Linux amd64/arm64 节点程序和构建工具均已交叉编译通过。
+旧 `md5` / `existence` 配置可以继续运行；新模块使用独立后缀，不自动把旧 MD5 状态视为新规则的可信基线。停止原 timer 后迁移到常驻服务，避免重复调度。A 上保存私有 YAML，节点无需留存旧明文配置。
 
-交付构建与测试结果见发布包中的 `BUILD-INFO.txt`。实际 Linux 主机的 wtmp/last 兼容性、systemd 执行及 node_exporter 抓取仍需在目标环境验收。
+验收时先运行 `go test ./...`、`go vet ./...`，再在目标 Linux 主机验证：首次基线、文件增删改、多 MD5 部分匹配、进程 OR 规则和实例变化、白名单、连续多次 SSH 登录、服务重启续读、北京时间零点切割、每轮新 `.prom` 与 node_exporter 采集。仓库的自动测试使用隔离目录和模拟日志；不能替代目标机的 journal 权限、`/proc` 可见性、systemd 和网络接收端验收。
 
-登录工具参数依据：[util-linux last 手册](https://man7.org/linux/man-pages/man1/last.1%40%40util-linux.html)。
+服务按周期采样，无法发现两次巡检之间发生又恢复的短暂文件/进程变化。日志数据源已丢弃的登录记录不能凭空恢复。历史报告、日志和指标不自动清理，由部署方按保留期限归档。当前源码文档不代表已有 `dist` 或旧发布压缩包已同步更新，交付前应重新构建。

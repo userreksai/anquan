@@ -25,26 +25,46 @@ func collectLogin(c LoginConfig, location *time.Location) (LoginResult, []Issue)
 		var f *os.File
 		f, err = os.Open(c.Path)
 		if err == nil {
-			r.Record, err = parseJSONL(f)
+			r.Records, err = parseJSONLRecords(f)
 			f.Close()
 		}
 	} else {
 		r.Record, err = readWtmp(c)
+		if r.Record != nil {
+			r.Records = []LoginRecord{*r.Record}
+		}
 	}
 	if err != nil {
 		r.Success = false
 		return r, []Issue{{"login", err.Error()}}
 	}
-	if r.Record != nil {
-		r.Record.LoginTime = r.Record.LoginTime.In(location)
+	for i := range r.Records {
+		r.Records[i].LoginTime = r.Records[i].LoginTime.In(location)
 	}
+	r.Record = latestLogin(r.Records)
 	return r, nil
 }
 
 func parseJSONL(reader io.Reader) (*LoginRecord, error) {
+	records, err := parseJSONLRecords(reader)
+	return latestLogin(records), err
+}
+
+func latestLogin(records []LoginRecord) *LoginRecord {
+	var latest *LoginRecord
+	for _, record := range records {
+		if latest == nil || !record.LoginTime.Before(latest.LoginTime) {
+			copy := record
+			latest = &copy
+		}
+	}
+	return latest
+}
+
+func parseJSONLRecords(reader io.Reader) ([]LoginRecord, error) {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 4096), 1024*1024)
-	var latest *LoginRecord
+	var records []LoginRecord
 	line := 0
 	for scanner.Scan() {
 		line++
@@ -65,15 +85,12 @@ func parseJSONL(reader io.Reader) (*LoginRecord, error) {
 		if record.SourceIP != "" && net.ParseIP(record.SourceIP) == nil {
 			return nil, fmt.Errorf("JSONL line %d: invalid source_ip", line)
 		}
-		if latest == nil || !record.LoginTime.Before(latest.LoginTime) {
-			copy := record
-			latest = &copy
-		}
+		records = append(records, record)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read JSONL: %w", err)
 	}
-	return latest, nil
+	return records, nil
 }
 
 // Capped output prevents an unexpected last implementation from exhausting memory.
@@ -110,6 +127,12 @@ func readWtmp(c LoginConfig) (*LoginRecord, error) {
 }
 
 func parseLast(output string) (*LoginRecord, error) {
+	records, err := parseLastRecords(output)
+	return latestLogin(records), err
+}
+
+func parseLastRecords(output string) ([]LoginRecord, error) {
+	var records []LoginRecord
 	for _, line := range strings.Split(output, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
@@ -146,7 +169,7 @@ func parseLast(output string) (*LoginRecord, error) {
 				ip = ""
 			}
 		}
-		return &LoginRecord{User: fields[0], Terminal: fields[1], SourceIP: ip, LoginTime: loginTime}, nil
+		records = append(records, LoginRecord{User: fields[0], Terminal: fields[1], SourceIP: ip, LoginTime: loginTime})
 	}
-	return nil, nil
+	return records, nil
 }

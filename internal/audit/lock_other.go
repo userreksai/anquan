@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !windows
 
 package audit
 
@@ -7,7 +7,7 @@ import (
 	"os"
 )
 
-// Portable fallback for local development. Linux uses automatically released flock.
+// Portable fallback for local development. Linux and Windows use OS file locks.
 func lockState(path string) (func(), error) {
 	if err := os.Mkdir(path, 0700); err != nil {
 		return nil, fmt.Errorf("cannot lock %s: %w", path, err)

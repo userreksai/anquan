@@ -1,15 +1,18 @@
 [Unit]
-Description=Anqu file and login audit
-After=local-fs.target
+Description=Anqu continuous security monitoring agent
+After=local-fs.target network.target
+Conflicts=anqu-oneshot.service
 
 [Service]
-Type=oneshot
+Type=simple
 User=root
 UMask=0022
-ExecStart=/usr/local/anqu/anqu
-# Reduce accidental core dumps; this does not prevent root from inspecting memory.
+ExecStart=/usr/local/anqu/anqu -service
+Restart=on-failure
+RestartSec=5
 LimitCORE=0
-# 2 means collection succeeded but changes/missing files were found.
-SuccessExitStatus=2
 NoNewPrivileges=true
 PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

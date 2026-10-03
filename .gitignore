@@ -7,3 +7,7 @@ demo/output/
 /config.yaml
 /config.yml
 /demo/anqu
+
+# Separate master/web repositories developed beside the Agent.
+/anquan-server-master/
+/anquan-server-web/

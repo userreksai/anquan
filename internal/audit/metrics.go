@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Prometheus label escaping differs from Go quoting (notably for tabs and UTF-8).
@@ -31,8 +32,42 @@ func metrics(r Report) []byte {
 	gauge("anqu_collection_errors", "Number of collection or state errors in this run.", len(r.Errors))
 	header("anqu_module_enabled", "Whether a collection module is enabled.", "gauge")
 	fmt.Fprintf(&b, "anqu_module_enabled{module=\"md5\"} %d\nanqu_module_enabled{module=\"login\"} %d\nanqu_module_enabled{module=\"existence\"} %d\n", bit(r.MD5.Enabled), bit(r.Login.Enabled), bit(r.Existence.Enabled))
+	fmt.Fprintf(&b, "anqu_module_enabled{module=\"files\"} %d\nanqu_module_enabled{module=\"processes\"} %d\n", bit(r.Files.Enabled), bit(r.Processes.Enabled))
 	header("anqu_module_success", "Whether the module collected successfully; disabled modules return one.", "gauge")
 	fmt.Fprintf(&b, "anqu_module_success{module=\"md5\"} %d\nanqu_module_success{module=\"login\"} %d\nanqu_module_success{module=\"existence\"} %d\n", bit(r.MD5.Success), bit(r.Login.Success), bit(r.Existence.Success))
+	fmt.Fprintf(&b, "anqu_module_success{module=\"files\"} %d\nanqu_module_success{module=\"processes\"} %d\n", bit(r.Files.Success), bit(r.Processes.Success))
+	gauge("anqu_alerts", "Number of alerts in this scan.", len(r.Alerts))
+	if r.Files.Enabled {
+		gauge("anqu_files_scanned", "Files hashed in this scan.", r.Files.Scanned)
+		header("anqu_files_check", "Per-file result, including missing and hash mismatches.", "gauge")
+		for _, item := range r.Files.Items {
+			fmt.Fprintf(&b, "anqu_files_check{path=%s,rule=%s,mode=%s,status=%s} 1\n", label(item.Path), label(item.Rule), label(item.Mode), label(item.Status))
+		}
+		header("anqu_files_change", "Changed files relative to the previous successful scan.", "gauge")
+		for _, item := range r.Files.Changes {
+			fmt.Fprintf(&b, "anqu_files_change{path=%s,kind=%s} 1\n", label(item.Path), label(item.Kind))
+		}
+	}
+	if r.Processes.Enabled {
+		gauge("anqu_processes_scanned", "Running process instances excluding this agent.", r.Processes.Scanned)
+		gauge("anqu_processes_missing", "Required command groups with no running match.", r.Processes.Missing)
+		header("anqu_process_exists", "One if any command in the configured group is running.", "gauge")
+		for _, item := range r.Processes.Items {
+			fmt.Fprintf(&b, "anqu_process_exists{rule=%s} %d\n", label(item.Rule), bit(item.Exists))
+		}
+		header("anqu_process_instances", "Instances by full command, including whitelisted commands.", "gauge")
+		for _, item := range r.Processes.Inventory {
+			fmt.Fprintf(&b, "anqu_process_instances{command=%s,whitelisted=%s} %d\n", label(item.Command), label(strconv.FormatBool(item.Whitelisted)), item.Count)
+		}
+	}
+	if r.Login.Enabled {
+		gauge("anqu_ssh_logins_new", "Previously unreported successful login records collected this run.", len(r.Login.Records))
+		gauge("anqu_ssh_logins_pending", "One when another page of login data may remain.", bit(r.Login.Pending))
+		header("anqu_ssh_login_timestamp_seconds", "Time of each newly observed login.", "gauge")
+		for i, item := range r.Login.Records {
+			fmt.Fprintf(&b, "anqu_ssh_login_timestamp_seconds{id=%s,user=%s,source_ip=%s,terminal=%s} %d\n", label(item.ID+":"+strconv.Itoa(i)), label(item.User), label(item.SourceIP), label(item.Terminal), item.LoginTime.Unix())
+		}
+	}
 	if r.MD5.Enabled && r.MD5.Success {
 		gauge("anqu_md5_files", "Number of regular files hashed in this run.", r.MD5.Scanned)
 		gauge("anqu_md5_skipped", "Number of symbolic links and special files skipped.", r.MD5.Skipped)
@@ -90,4 +125,29 @@ func metrics(r Report) []byte {
 		}
 	}
 	return []byte(b.String())
+}
+
+// Retained .prom files share a collector directory. Give each snapshot its own
+// series and metric namespace so it cannot collide with another scan or latest.
+func snapshotMetrics(r Report, source []byte) []byte {
+	var out strings.Builder
+	labels := "host=" + label(r.Host) + ",run_id=" + label(r.StartedAt.Format(time.RFC3339Nano))
+	for _, line := range strings.Split(string(source), "\n") {
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") {
+			line = strings.Replace(line, "anqu_", "anqu_snapshot_", 1)
+		} else {
+			line = strings.Replace(line, "anqu_", "anqu_snapshot_", 1)
+			if i := strings.IndexByte(line, '{'); i >= 0 {
+				line = line[:i+1] + labels + "," + line[i+1:]
+			} else if i := strings.IndexByte(line, ' '); i >= 0 {
+				line = line[:i] + "{" + labels + "}" + line[i:]
+			}
+		}
+		out.WriteString(line)
+		out.WriteByte('\n')
+	}
+	return []byte(out.String())
 }
