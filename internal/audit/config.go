@@ -19,13 +19,18 @@ import (
 
 // JSON tags preserve internal MD5 scope fingerprints; user configuration is YAML.
 type Config struct {
-	OutputDir string          `json:"output_dir" yaml:"output_dir"`
-	StateFile string          `json:"state_file" yaml:"state_file"`
-	Timezone  string          `json:"timezone" yaml:"timezone"`
-	MD5       MD5Config       `json:"md5" yaml:"md5"`
-	Login     LoginConfig     `json:"login" yaml:"login"`
-	Existence ExistenceConfig `json:"existence" yaml:"existence"`
-	location  *time.Location
+	OutputDir         string                   `json:"output_dir" yaml:"output_dir"`
+	StateFile         string                   `json:"state_file" yaml:"state_file"`
+	Timezone          string                   `json:"timezone" yaml:"timezone"`
+	MD5               MD5Config                `json:"md5" yaml:"md5"`
+	Login             LoginConfig              `json:"login" yaml:"login"`
+	Existence         ExistenceConfig          `json:"existence" yaml:"existence"`
+	FilesMonitoring   *FilesMonitoringConfig   `json:"FilesMonitoring,omitempty" yaml:"FilesMonitoring,omitempty"`
+	ProcessMonitoring *ProcessMonitoringConfig `json:"ProcessMonitoring,omitempty" yaml:"ProcessMonitoring,omitempty"`
+	Server            []string                 `json:"server,omitempty" yaml:"server,omitempty"`
+	AgentIP           string                   `json:"agent_ip,omitempty" yaml:"agent_ip,omitempty"`
+	Setup             *SetupConfig             `json:"setup,omitempty" yaml:"setup,omitempty"`
+	location          *time.Location
 }
 
 type MD5Config struct {
@@ -36,12 +41,14 @@ type MD5Config struct {
 }
 
 type LoginConfig struct {
-	Enabled        bool   `json:"enabled" yaml:"enabled"`
-	Source         string `json:"source" yaml:"source"`
-	Path           string `json:"path" yaml:"path"`
-	LastCommand    string `json:"last_command" yaml:"last_command"`
-	TimeoutSeconds int    `json:"timeout_seconds" yaml:"timeout_seconds"`
-	MaxRecords     int    `json:"max_records" yaml:"max_records"`
+	Enabled              bool   `json:"enabled" yaml:"enabled"`
+	Source               string `json:"source" yaml:"source"`
+	Path                 string `json:"path" yaml:"path"`
+	LastCommand          string `json:"last_command" yaml:"last_command"`
+	JournalCommand       string `json:"journal_command" yaml:"journal_command"`
+	InitialLookbackHours int    `json:"initial_lookback_hours" yaml:"initial_lookback_hours"`
+	TimeoutSeconds       int    `json:"timeout_seconds" yaml:"timeout_seconds"`
+	MaxRecords           int    `json:"max_records" yaml:"max_records"`
 }
 
 type ExistenceConfig struct {
@@ -59,12 +66,26 @@ func decodeYAML(data []byte) (Config, error) {
 	c := Config{
 		OutputDir: "/usr/local/anqu", StateFile: "state/md5.json", Timezone: "Asia/Shanghai",
 		MD5:       MD5Config{Enabled: true, Recursive: true},
-		Login:     LoginConfig{Enabled: true, Source: "wtmp", Path: "/var/log/wtmp", LastCommand: "last", TimeoutSeconds: 10, MaxRecords: 1000},
+		Login:     LoginConfig{Enabled: true, Source: "wtmp", Path: "/var/log/wtmp", LastCommand: "last", JournalCommand: "journalctl", InitialLookbackHours: 24, TimeoutSeconds: 10, MaxRecords: 1000},
 		Existence: ExistenceConfig{Enabled: true},
 	}
 	data = bytes.TrimSpace(bytes.TrimPrefix(data, []byte{0xef, 0xbb, 0xbf}))
 	if json.Valid(data) {
 		return c, fmt.Errorf("JSON configuration is not supported; use YAML mapping syntax")
+	}
+	// Inspect top-level keys only to select defaults, then strictly decode below.
+	var keys map[string]yaml.Node
+	if err := yaml.Unmarshal(data, &keys); err != nil {
+		return c, fmt.Errorf("YAML configuration: %w", err)
+	}
+	for _, key := range []string{"FilesMonitoring", "ProcessMonitoring", "server", "setup"} {
+		if value, exists := keys[key]; exists {
+			if value.Tag == "!!null" {
+				return c, fmt.Errorf("%s cannot be null; omit the field to disable it", key)
+			}
+			c.MD5.Enabled, c.Existence.Enabled = false, false
+			c.Login.Source = "journal"
+		}
 	}
 	d := yaml.NewDecoder(bytes.NewReader(data))
 	d.KnownFields(true)
@@ -283,11 +304,35 @@ func normalizeConfig(c Config, base string, rules pathRules) (Config, error) {
 		}
 	}
 	if c.Login.Enabled {
-		if c.Login.Source != "wtmp" && c.Login.Source != "jsonl" {
-			return c, fmt.Errorf("login.source must be wtmp or jsonl")
+		if c.Login.JournalCommand == "" {
+			c.Login.JournalCommand = "journalctl"
 		}
-		if err := resolveField("login.path", base, &c.Login.Path); err != nil {
-			return c, err
+		if c.Login.InitialLookbackHours == 0 {
+			c.Login.InitialLookbackHours = 24
+		}
+		if c.Login.InitialLookbackHours < 1 || c.Login.InitialLookbackHours > 8760 {
+			return c, fmt.Errorf("login.initial_lookback_hours must be 1..8760")
+		}
+		if c.Login.Source != "wtmp" && c.Login.Source != "jsonl" && c.Login.Source != "journal" && c.Login.Source != "authlog" {
+			return c, fmt.Errorf("login.source must be journal, authlog, wtmp or jsonl")
+		}
+		if c.Login.Source != "journal" {
+			if c.Login.Source == "authlog" && c.Login.Path == "/var/log/wtmp" {
+				c.Login.Path = "/var/log/auth.log"
+			}
+			if err := resolveField("login.path", base, &c.Login.Path); err != nil {
+				return c, err
+			}
+		} else {
+			c.Login.Path = ""
+			if strings.TrimSpace(c.Login.JournalCommand) == "" {
+				return c, fmt.Errorf("login.journal_command cannot be blank")
+			}
+			if strings.ContainsAny(c.Login.JournalCommand, "/\\") {
+				if err := resolveField("login.journal_command", base, &c.Login.JournalCommand); err != nil {
+					return c, err
+				}
+			}
 		}
 		if strings.TrimSpace(c.Login.LastCommand) == "" || c.Login.TimeoutSeconds < 1 || c.Login.TimeoutSeconds > 3600 || c.Login.MaxRecords < 1 || c.Login.MaxRecords > 100000 {
 			return c, fmt.Errorf("invalid login command, timeout_seconds (1..3600) or max_records (1..100000)")
@@ -306,6 +351,9 @@ func normalizeConfig(c Config, base string, rules pathRules) (Config, error) {
 		if _, err := validateChecks(c.Existence, rules); err != nil {
 			return c, err
 		}
+	}
+	if err := normalizeMonitoring(&c, base, rules); err != nil {
+		return c, err
 	}
 	return c, nil
 }

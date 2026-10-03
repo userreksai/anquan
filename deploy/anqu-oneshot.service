@@ -1,0 +1,15 @@
+[Unit]
+Description=Anqu one-shot security audit for optional timer
+After=local-fs.target network.target
+Conflicts=anqu.service
+
+[Service]
+Type=oneshot
+User=root
+UMask=0022
+ExecStart=/usr/local/anqu/anqu -once
+# 2 means collection succeeded and detected an alert.
+SuccessExitStatus=2
+LimitCORE=0
+NoNewPrivileges=true
+PrivateTmp=true

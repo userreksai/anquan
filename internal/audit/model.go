@@ -3,15 +3,19 @@ package audit
 import "time"
 
 type Report struct {
-	Version    int             `json:"version"`
-	Host       string          `json:"host"`
-	StartedAt  time.Time       `json:"started_at"`
-	FinishedAt time.Time       `json:"finished_at"`
-	Success    bool            `json:"collection_success"`
-	MD5        MD5Result       `json:"md5"`
-	Login      LoginResult     `json:"login"`
-	Existence  ExistenceResult `json:"existence"`
-	Errors     []Issue         `json:"errors"`
+	Version       int                  `json:"version"`
+	Host          string               `json:"host"`
+	StartedAt     time.Time            `json:"started_at"`
+	FinishedAt    time.Time            `json:"finished_at"`
+	Success       bool                 `json:"collection_success"`
+	MD5           MD5Result            `json:"md5"`
+	Login         LoginResult          `json:"login"`
+	Existence     ExistenceResult      `json:"existence"`
+	Errors        []Issue              `json:"errors"`
+	Files         FilesResult          `json:"files_monitoring"`
+	Processes     ProcessResult        `json:"process_monitoring"`
+	Alerts        []Alert              `json:"alerts"`
+	Notifications []NotificationResult `json:"notifications"`
 }
 
 type Issue struct {
@@ -39,6 +43,8 @@ type MD5Result struct {
 }
 
 type LoginRecord struct {
+	ID        string    `json:"id,omitempty"`
+	Method    string    `json:"method,omitempty"`
 	SourceIP  string    `json:"source_ip"`
 	LoginTime time.Time `json:"login_time"`
 	User      string    `json:"user"`
@@ -46,11 +52,13 @@ type LoginRecord struct {
 }
 
 type LoginResult struct {
-	Enabled bool         `json:"enabled"`
-	Success bool         `json:"success"`
-	Source  string       `json:"source"`
-	Path    string       `json:"path"`
-	Record  *LoginRecord `json:"record"`
+	Enabled bool          `json:"enabled"`
+	Success bool          `json:"success"`
+	Source  string        `json:"source"`
+	Path    string        `json:"path"`
+	Record  *LoginRecord  `json:"record"`
+	Records []LoginRecord `json:"records"`
+	Pending bool          `json:"pending"`
 }
 
 type CheckResult struct {
@@ -74,4 +82,21 @@ type OutputPaths struct {
 	JSON   string
 	Prom   string
 	Latest string
+	Log    string
+}
+
+type Alert struct {
+	Module  string `json:"module"`
+	Kind    string `json:"kind"`
+	Target  string `json:"target"`
+	Message string `json:"message"`
+	Before  string `json:"before,omitempty"`
+	After   string `json:"after,omitempty"`
+}
+
+type NotificationResult struct {
+	Server string `json:"server"`
+	IP     string `json:"ip,omitempty"`
+	Sent   int    `json:"datagrams_sent"`
+	Error  string `json:"error,omitempty"`
 }

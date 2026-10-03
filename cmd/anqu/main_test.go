@@ -57,7 +57,7 @@ func TestAgentUsesExecutableDirectoryWithoutConfigFile(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	data := []byte("output_dir: output\nmd5:\n  enabled: false\nlogin:\n  enabled: false\nexistence:\n  enabled: false\n")
 	code := run(nil, &stdout, &stderr, func() ([]byte, error) { return data, nil }, func() (string, error) { return filepath.Join(dir, "anqu"), nil })
-	if code != 0 || stdout.Len() != 0 || stderr.Len() != 0 {
+	if code != 0 || !strings.Contains(stdout.String(), `"event":"agent_started"`) || !strings.Contains(stdout.String(), `"event":"scan_complete"`) || stderr.Len() != 0 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	if _, err := os.Stat(filepath.Join(dir, "output", "textfile", "anqu.prom")); err != nil {
@@ -76,7 +76,7 @@ func TestAgentFindingsExitTwoAndPreserveRealPathsInReports(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	data := []byte("output_dir: output\nmd5:\n  enabled: false\nlogin:\n  enabled: false\nexistence:\n  base_dir: watched\n  files:\n    - path: missing.conf\n")
 	code := run(nil, &stdout, &stderr, func() ([]byte, error) { return data, nil }, func() (string, error) { return filepath.Join(dir, "anqu"), nil })
-	if code != 2 || stdout.Len() != 0 || stderr.Len() != 0 {
+	if code != 2 || !strings.Contains(stdout.String(), `"event":"alert"`) || stderr.Len() != 0 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	reports, err := filepath.Glob(filepath.Join(dir, "output", "*.json"))
