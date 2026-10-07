@@ -3,8 +3,8 @@
 # go run ./cmd/anqu-build -output ./dist/anqu-linux-amd64 -goos linux -goarch amd64
 # 配置区分大小写；fils 保留用户约定拼写；使用空格缩进。
 # 配置中的路径属于目标节点。相对路径以节点程序所在目录为基准。
-
-output_dir: /usr/local/anqu
+#output_dir state_file 为数据MD5记录信息目录 
+output_dir: /usr/local/anquan  # 自动创建 /usr/local/anqu/ 和 /usr/local/anqu/state/，前提是运行用户有写入权限。
 state_file: state/md5.json   # 相对于 output_dir；新模块使用 .files/.processes/.logins 后缀
 timezone: Asia/Shanghai      # 报告显示时区；日常日志切割始终使用北京时间
 
