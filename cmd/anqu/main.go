@@ -21,15 +21,14 @@ func main() {
 }
 
 // Agent nodes have no external configuration input or configuration-export API.
-// Each run writes local logs and stdout for the service journal.
+// Single checks keep local logs without terminal output; services also log to stdout.
 func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), executable func() (string, error)) int {
 	flags := flag.NewFlagSet("anqu", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	showVersion := flags.Bool("version", false, "print program version")
 	service := flags.Bool("service", false, "run continuously using setup.interval_seconds")
-	once := flags.Bool("once", false, "run one check (default)")
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: anqu [-once | -service] [-version]\nUses configuration embedded on the build server; -service checks immediately and periodically.")
+		fmt.Fprintln(stderr, "Usage: anqu [-service] [-version]\nRuns one silent check by default using embedded configuration; -service checks immediately and periodically.")
 	}
 	if err := flags.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -45,9 +44,8 @@ func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), e
 		fmt.Fprintln(stdout, "anqu "+version)
 		return 0
 	}
-	if *once && *service {
-		fmt.Fprintln(stderr, "-once and -service cannot be combined")
-		return 1
+	if !*service {
+		stdout, stderr = io.Discard, io.Discard
 	}
 	data, err := load()
 	if err != nil {

@@ -32,7 +32,7 @@ go run ./cmd/anqu-build -config ./config.yaml -output ./dist/anqu-linux-amd64 -g
 
 ```sh
 go run ./cmd/anqu-build -config ./demo/config.yaml -output ./demo/anqu -goos linux -goarch amd64
-./demo/anqu -once
+./demo/anqu
 # 修改 demo/watched/app.conf 后再执行，查看 modified；第三次无修改则恢复 unchanged。
 ```
 
@@ -209,11 +209,11 @@ JSONL 示例：
 ```sh
 sudo install -d -m 0755 /usr/local/anqu
 sudo install -m 0700 ./anqu-linux-amd64 /usr/local/anqu/anqu
-sudo /usr/local/anqu/anqu -once
+sudo /usr/local/anqu/anqu
 # 退出码 2 表示检测到告警；不等于程序未执行。
 ```
 
-无参数和 `-once` 都执行一轮，并在采集前发送一次启动心跳。`-service` 启动常驻循环，启动心跳发送后立即执行首轮采集，并按 `setup.interval_seconds` 周期执行，不重叠执行；单轮超过周期时跳过无法及时执行的节拍。常驻模式另有独立的 30 秒心跳，不受扫描周期或耗时影响。`-help`、`-version` 用于查看帮助和版本；没有节点 `-config`、`-check-config` 或导出配置接口。
+无参数默认静默执行一轮（不输出到终端，本地日志、上报和退出码保留），并在采集前发送一次启动心跳。`-service` 启动常驻循环，启动心跳发送后立即执行首轮采集，并按 `setup.interval_seconds` 周期执行，不重叠执行；单轮超过周期时跳过无法及时执行的节拍。常驻模式另有独立的 30 秒心跳，不受扫描周期或耗时影响。`-help`、`-version` 用于查看帮助和版本；没有节点 `-config`、`-check-config` 或导出配置接口。
 
 推荐常驻服务：
 

@@ -7,7 +7,7 @@ Conflicts=anqu.service
 Type=oneshot
 User=root
 UMask=0022
-ExecStart=/usr/local/anqu/anqu -once
+ExecStart=/usr/local/anqu/anqu
 # 2 means collection succeeded and detected an alert.
 SuccessExitStatus=2
 LimitCORE=0
