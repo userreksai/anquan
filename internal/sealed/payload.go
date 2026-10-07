@@ -1,7 +1,6 @@
 package sealed
 
-// embeddedPayload is replaced in the Go build overlay created by anqu-build.
-// An ordinary go build intentionally produces an agent without configuration.
-func embeddedPayload() (key, ciphertext []byte) {
-	return nil, nil
+// Fixed deployment identity shared by all builds. This is not protection from source readers or root.
+func embeddedIdentity() string {
+	return "AGE-SECRET-KEY-1AN6SG8AWKATKAL5E04NXUXNENWVYXC7DF8E4PHX4FMT78N082CMS7H355L"
 }

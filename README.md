@@ -6,27 +6,38 @@ Anqu 在 Linux 节点持续检查文件 MD5、文件增删和进程变化，并�
 
 配套主控与 Vue 前端的安装、端口、默认登录和密码重置见 [安全中心主控部署](docs/主控部署.md)。
 
-沿用内置加密配置部署方式：A 构建机保存 YAML 和源码，B/C 节点只部署生成的程序。节点不读取旁边的配置文件；变更配置后在 A 重新构建并替换程序。AES-256-GCM 内置配置减少明文分发，报告和基线保留真实路径；本机管理员仍可能从程序或内存恢复配置。
+Agent、Master 和 Web 的整体架构、模块职责、数据流、存储及可靠性边界见 [架构设计](docs/架构设计.md)。
+
+正式部署、服务运行、SQLite 离线查询、SSH 与 UDP 调试、HTTP API 以及全部现有测试命令见 [部署调试与测试命令手册](docs/部署调试与测试命令手册.md)。
+
+Agent 使用外置 age 加密配置：构建时只嵌入解密私钥，不嵌入巡检 YAML。同一份二进制可以部署到多个节点，每个节点使用自己的 `config.age`，放在可执行文件所在目录（不是 Shell 当前工作目录）。配置更新不必重新编译；无参数单次运行每次启动重新读取，`-service` 常驻模式替换后重启生效。采集、SSH 登录游标和 UDP 上报逻辑不变。本机管理员仍可能从程序或内存恢复私钥和配置。
 
 ## 构建和快速验证
 
-构建机需要 Go 1.22 或更新版本。首次构建会下载 `go.yaml.in/yaml/v3` 依赖。
+构建机需要 Go 1.25 或更新版本。首次构建会下载 age 和 YAML 依赖。
 
 ```sh
 git clone https://github.com/userreksai/anquan.git
 cd anquan
-# 已有私有配置时不要覆盖。
-if [ ! -e config.yaml ]; then cp configs/config.example.yaml config.yaml; fi
-chmod 0600 config.yaml
-vi config.yaml
-
 go test ./...
 go vet ./...
-go run ./cmd/anqu-build -config ./config.yaml -output ./dist/anqu-linux-amd64 -goos linux -goarch amd64
+go run ./cmd/anqu-build -output ./dist/anquan -goos linux -goarch amd64
 # ARM64：将输出名和 -goarch 改为 anqu-linux-arm64 / arm64。
 ```
 
-配置中的路径属于目标节点，构建机不必存在这些路径。普通 `go build ./cmd/anqu` 不会嵌入配置；部署程序必须由 `anqu-build` 生成。构建参数包括 `-config`、`-output`、`-goos`、`-goarch` 和 `-go`。默认配置是当前工作目录 `config.yaml`，默认目标系统是 Linux。
+Agent 和 Master 代码内置一组固定配套密钥，构建不会重新生成密钥，页面不显示或要求输入密钥。在“管理设置 → Age 配置加密”编辑 YAML，点击加密并下载 `config.age`，与 Agent 一起部署即可。无需密钥文件、环境变量或公钥输入。生产管理页面应使用 HTTPS 传输明文输入。源码中的固定私钥可被源码持有者或节点管理员提取，这个方案用于隐藏配置明文，不防上述人员解密。
+
+构建不需要 YAML。可选 `-config ./config.yaml` 仅用于同时生成初始 `config.age`，不会将 YAML 编译进二进制。其他参数包括 `-output`、`-goos`、`-goarch` 和 `-go`；默认目标系统为 Linux。普通 `go build ./cmd/anqu` 也使用同一内置密钥。首次切换到此固定密钥版本时，需要更新 Agent 和 Master，并用新页面重新加密旧配置；之后配置更新无需编译。
+
+部署后的目录例如：
+
+```text
+/usr/local/anquan/
+  anquan
+  config.age
+```
+
+保留密文完整的 `-----BEGIN AGE ENCRYPTED FILE-----` / `-----END AGE ENCRYPTED FILE-----` 标记。替换时先上传临时文件，再在同一文件系统重命名为 `config.age`，避免运行期间读到一半文件。明文、缺失、截断或公钥不匹配的配置会被拒绝，不回退到旧的内嵌配置。单次运行保持静默，失败退出码为 1；常驻模式会输出错误到服务日志。
 
 本地演示使用相对路径、JSONL 模拟登录及独立输出目录，不需要系统日志或进程权限：
 
@@ -60,10 +71,9 @@ FilesMonitoring:
 
 ProcessMonitoring:
   exists:
-    - '/usr/sbin/sshd -D|/usr/sbin/ssh -D'
-  Process:
-    whitelist:
-      - /usr/sbin/sshd -D
+    # 按目标节点实际完整命令调整；默认仅检查关键进程存活。
+    - '/usr/sbin/sshd -D'
+  # 省略 Process，关闭全机进程增删和实例数量变化告警。
 
 login:
   enabled: true
@@ -116,9 +126,17 @@ FilesMonitoring:
 
 ### 进程规则
 
+推荐生产配置仅保留 `exists`，按节点职责逐行列出必须运行的服务，并省略整个 `Process` 段。示例中的 sshd 命令必须按目标节点实际值调整；`ssh` 是客户端，不能作为 `sshd` 服务的备选命令。
+
 `exists` 每行是一个独立必须满足的规则，`|` 分隔多个系统适配命令，任意一个运行即满足该行。允许两个以上备选。命令经空白归一化后整行精确比较，`/usr/sbin/sshd -D-extra` 不会匹配 `/usr/sbin/sshd -D`。请按目标主机 `/proc/<PID>/cmdline` 的实际命令填写；仅文件存在不等于进程正在运行。
 
 `Process: {}` 开启整个进程列表的滚动监控。首次建立列表；之后比较完整命令和实例数量，因此相同命令由两个实例变一个也会报告 `deleted`。白名单保留在当前清单和日志中，只抑制列表增删告警，仍参与 `exists` 检查。省略 `Process` 时只检查 `exists`。
+
+全机模式会将临时命令、SSH 会话和内核线程的变化纳入比较，可能一次产生大量告警。`whitelist` 只支持完整命令精确匹配，不支持通配符、前缀或正则；清空白名单或改成 `Process: {}` 不会缩小范围。当前没有仅监控指定业务进程变化的 include 配置。
+
+已有节点降噪时，在实际 YAML 中删除 `ProcessMonitoring.Process`，保留并核对 `exists`，然后重新加密并替换 `config.age`，常驻服务需重启。此模式不读取或更新 `.processes` 基线，无需删除旧基线，也不要清理文件基线或登录游标。以后重新启用全机监控时，应先停止 Agent，备份并移走旧 `.processes`，避免将停用期间的变化一起告警。
+
+此调整关闭全机变化告警，但本地报告和日志仍保存完整进程清单；关键进程持续缺失时仍每轮告警，当前没有持续缺失告警的冷却配置。验收时检查新扫描中 `processes.changes` 为空，存活检查正常；历史告警及主控已入队的通知不会因配置变更自动清除。
 
 读取 `/proc` 不调用 shell 或 `ps`，排除当前 Agent 的 PID。没有 argv 的内核线程或僵尸进程以 `[comm]` 记录。扫描时进程正常退出会跳过；权限或读取错误使本轮进程模块失败并保留基线。
 
@@ -209,6 +227,7 @@ JSONL 示例：
 ```sh
 sudo install -d -m 0755 /usr/local/anqu
 sudo install -m 0700 ./anqu-linux-amd64 /usr/local/anqu/anqu
+sudo install -m 0600 ./config.age /usr/local/anqu/config.age
 sudo /usr/local/anqu/anqu
 # 退出码 2 表示检测到告警；不等于程序未执行。
 ```

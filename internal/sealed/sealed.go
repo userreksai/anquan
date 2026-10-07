@@ -1,4 +1,4 @@
-// Package sealed reads build-time configuration without a runtime config file.
+// Package sealed reads encrypted configuration beside the agent executable.
 // Encryption prevents plain-text extraction with strings; it does not stop an
 // administrator or a reverse engineer from recovering an executable's key.
 package sealed
@@ -10,19 +10,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 )
 
 // ConfigAAD separates embedded configuration from other encrypted data formats.
 const ConfigAAD = "anqu/embedded-config/v1"
 
-// Config decrypts the embedded YAML in memory. There is no filesystem fallback.
+// Config reads only config.age beside the executable, never the working directory.
 func Config() ([]byte, error) {
-	key, ciphertext := embeddedPayload()
-	defer clear(key)
-	if len(key) == 0 || len(ciphertext) == 0 {
-		return nil, errors.New("no embedded configuration: build this agent with anqu-build")
+	path, err := os.Executable()
+	if err != nil {
+		return nil, err
 	}
-	return Open(key, ciphertext, []byte(ConfigAAD))
+	return LoadAge(filepath.Join(filepath.Dir(path), ConfigFilename), embeddedIdentity())
 }
 
 func newGCM(key []byte) (cipher.AEAD, error) {

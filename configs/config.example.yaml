@@ -1,6 +1,7 @@
-# Anqu v0.4.0：A 构建机保存 YAML，B/C 节点只运行内置加密配置的 agent。
-# 复制为源码根目录 config.yaml，按目标节点实际情况调整后构建：
-# go run ./cmd/anqu-build -output ./dist/anqu-linux-amd64 -goos linux -goarch amd64
+# Anqu：在管理设置的 Age 配置加密页面编辑此 YAML，下载 config.age。
+# 将 config.age 放在 Agent 可执行文件旁边；无参数每次启动读取，常驻服务重启生效。
+# 通用 Agent 构建无需 YAML：go run ./cmd/anqu-build -output ./dist/anquan -goos linux -goarch amd64
+# 页面直接加密，无需填写或管理密钥；使用配套新版 Agent 读取。
 # 配置区分大小写；fils 保留用户约定拼写；使用空格缩进。
 # 配置中的路径属于目标节点。相对路径以节点程序所在目录为基准。
 #output_dir state_file 为数据MD5记录信息目录 
@@ -28,14 +29,19 @@ FilesMonitoring:
 
 ProcessMonitoring:
   exists:
-    # 整条规则是一个 YAML 字符串；任意一个完整命令行存在即正常。
-    - '/usr/sbin/sshd -D|/usr/sbin/ssh -D'
-  Process:
-    # 首次建立进程列表，之后按完整命令和实例数量比较增删。
-    # 白名单只免除列表变化告警，不免除上面的 exists 检查。
-    whitelist:
-      - /usr/sbin/sshd -D
-  # 无白名单时写 Process: {}；只检查存在时删除整个 Process 段。
+    # 默认只检查关键进程存活；请替换为目标节点 /proc/<PID>/cmdline 的实际完整命令。
+    # 每行必须满足；同一行用 | 分隔同一服务的备选命令，任意一个存在即正常。
+    # ssh 是客户端，不能作为 sshd 服务的存活替代项。
+    - '/usr/sbin/sshd -D'
+    # 业务服务按需逐行添加，参数必须与实际命令完全一致。
+    # - '/opt/app/bin/worker --config /etc/app/worker.yaml'
+  # 默认省略整个 Process 段，避免全机临时进程、SSH 会话和内核线程变化告警。
+  # 注意：Process: {} 和 whitelist: [] 都会开启全机变化监控，不表示关闭。
+  # 仅确需审计全机进程变化时才启用以下配置：
+  # Process:
+  #   whitelist:
+  #     - /usr/sbin/sshd -D
+  # 白名单仅按完整命令精确匹配（不支持通配符/正则），且不会免除 exists 检查。
 
 login:
   enabled: true

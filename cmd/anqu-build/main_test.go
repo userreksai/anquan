@@ -61,7 +61,7 @@ func TestBuildEnvironmentOverrides(t *testing.T) {
 	}
 }
 
-func TestFailedBuildPreservesExistingOutputAndCleansOverlay(t *testing.T) {
+func TestFailedBuildPreservesExistingOutputAndCleansStaging(t *testing.T) {
 	temp := t.TempDir()
 	config := filepath.Join(temp, "config.yaml")
 	if err := os.WriteFile(config, []byte("output_dir: /usr/local/anqu\nmd5:\n  enabled: false\nlogin:\n  enabled: false\nexistence:\n  enabled: false\n"), 0600); err != nil {
@@ -112,12 +112,8 @@ func main(){ b,_:=json.Marshal(os.Args); _=os.WriteFile(os.Getenv("ANQU_BUILD_TE
 	if err := json.Unmarshal(args, &recorded); err != nil {
 		t.Fatal(err)
 	}
-	for i, arg := range recorded {
-		if arg == "-overlay" {
-			if _, err := os.Stat(filepath.Dir(recorded[i+1])); !os.IsNotExist(err) {
-				t.Fatalf("private overlay/cache directory retained: %v", err)
-			}
-		}
+	if recorded[len(recorded)-1] != "./cmd/anqu" {
+		t.Fatal("wrong compiler target")
 	}
 	staged, err := filepath.Glob(filepath.Join(temp, ".anqu-output-*"))
 	if err != nil || len(staged) != 0 {

@@ -1,11 +1,8 @@
-// anqu-build reads YAML on the build machine and embeds only encrypted bytes
-// into a standalone agent. The encryption key is necessarily in that agent too:
-// this raises extraction cost, but cannot promise protection from its owner.
+// anqu-build embeds an age identity. Configuration is an external config.age.
 package main
 
 import (
 	"bytes"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -38,7 +35,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	var opts options
 	flags := flag.NewFlagSet("anqu-build", flag.ContinueOnError)
 	flags.SetOutput(stderr)
-	flags.StringVar(&opts.config, "config", "config.yaml", "YAML file on the build machine (relative to current directory)")
+	flags.StringVar(&opts.config, "config", "", "optional YAML to encrypt as config.age beside the output")
 	flags.StringVar(&opts.output, "output", "", "agent output file (default ./anqu, or ./anqu.exe for windows)")
 	flags.StringVar(&opts.goos, "goos", "linux", "target operating system")
 	flags.StringVar(&opts.goarch, "goarch", runtime.GOARCH, "target architecture, for example amd64 or arm64")
@@ -62,7 +59,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stdout, "agent=%s target=%s/%s\n", opts.output, opts.goos, opts.goarch)
-	fmt.Fprintln(stdout, "Configuration embedded; deploy only the agent executable.")
+	fmt.Fprintln(stdout, "Deploy the agent and config.age together. Encrypt configuration in the management page; no key setup required.")
 	fmt.Fprintln(stdout, "Embedded encryption increases extraction cost; administrators and reverse engineers can still recover it.")
 	return nil
 }
@@ -105,12 +102,16 @@ func readYAML(path string) ([]byte, error) {
 }
 
 func build(opts options, stdout, stderr io.Writer) error {
-	data, err := readYAML(opts.config)
-	if err != nil {
-		return err
-	}
-	if err := audit.ValidateEmbeddedYAML(data, opts.goos); err != nil {
-		return fmt.Errorf("validate embedded YAML: %w", err)
+	var data []byte
+	var err error
+	if opts.config != "" {
+		data, err = readYAML(opts.config)
+		if err != nil {
+			return err
+		}
+		if err := audit.ValidateEmbeddedYAML(data, opts.goos); err != nil {
+			return fmt.Errorf("validate YAML: %w", err)
+		}
 	}
 	defer clear(data)
 	root, err := projectRoot()
@@ -129,8 +130,13 @@ func build(opts options, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if err := protectConfigOutput(opts.config, output); err != nil {
-		return err
+	if opts.config != "" {
+		if err := protectConfigOutput(opts.config, output); err != nil {
+			return err
+		}
+	}
+	if filepath.Base(output) == sealed.ConfigFilename {
+		return errors.New("agent output must not use the configuration filename")
 	}
 
 	// All generated source and configuration-bearing build cache entries stay
@@ -148,30 +154,6 @@ func build(opts options, stdout, stderr io.Writer) error {
 			return err
 		}
 	}
-	key := make([]byte, 32)
-	defer clear(key)
-	if _, err := io.ReadFull(rand.Reader, key); err != nil {
-		return fmt.Errorf("generate encryption key: %w", err)
-	}
-	ciphertext, err := sealed.Seal(key, data, []byte(sealed.ConfigAAD))
-	if err != nil {
-		return err
-	}
-	payloadPath := filepath.Join(work, "payload.go")
-	if err := os.WriteFile(payloadPath, payloadSource(key, ciphertext), 0600); err != nil {
-		return err
-	}
-	overlay := struct {
-		Replace map[string]string
-	}{Replace: map[string]string{filepath.Join(root, "internal", "sealed", "payload.go"): payloadPath}}
-	overlayData, err := json.Marshal(overlay)
-	if err != nil {
-		return err
-	}
-	overlayPath := filepath.Join(work, "overlay.json")
-	if err := os.WriteFile(overlayPath, overlayData, 0600); err != nil {
-		return err
-	}
 	if err := os.MkdirAll(filepath.Dir(output), 0755); err != nil {
 		return err
 	}
@@ -184,7 +166,7 @@ func build(opts options, stdout, stderr io.Writer) error {
 	if err := staging.Close(); err != nil {
 		return err
 	}
-	cmd := exec.Command(compiler, "build", "-trimpath", "-buildvcs=false", "-ldflags=-s -w -buildid=", "-overlay", overlayPath, "-o", stagePath, "./cmd/anqu")
+	cmd := exec.Command(compiler, "build", "-trimpath", "-buildvcs=false", "-ldflags=-s -w -buildid=", "-o", stagePath, "./cmd/anqu")
 	cmd.Dir = root
 	cmd.Env = buildEnv(os.Environ(), map[string]string{
 		"CGO_ENABLED": "0", "GOOS": opts.goos, "GOARCH": opts.goarch,
@@ -202,6 +184,15 @@ func build(opts options, stdout, stderr io.Writer) error {
 	if err := os.Chmod(stagePath, 0700); err != nil {
 		return err
 	}
+	if len(data) > 0 {
+		ciphertext, err := sealed.EncryptConfig(data)
+		if err != nil {
+			return err
+		}
+		if err := writeAtomic(filepath.Join(filepath.Dir(output), sealed.ConfigFilename), ciphertext); err != nil {
+			return err
+		}
+	}
 	// The staging file shares the destination filesystem. A failed build never
 	// opens or truncates a previously deployed executable.
 	if err := os.Rename(stagePath, output); err != nil {
@@ -210,8 +201,20 @@ func build(opts options, stdout, stderr io.Writer) error {
 	return nil
 }
 
-func payloadSource(key, ciphertext []byte) []byte {
-	return []byte(fmt.Sprintf("package sealed\n\nfunc embeddedPayload() (key, ciphertext []byte) {\nreturn %#v, %#v\n}\n", key, ciphertext))
+func writeAtomic(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".anqu-output-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), path)
 }
 
 func protectConfigOutput(config, output string) error {

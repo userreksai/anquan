@@ -20,7 +20,7 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, sealed.Config, os.Executable))
 }
 
-// Agent nodes have no external configuration input or configuration-export API.
+// Agent nodes read config.age beside the executable; no plaintext config API.
 // Single checks keep local logs without terminal output; services also log to stdout.
 func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), executable func() (string, error)) int {
 	flags := flag.NewFlagSet("anqu", flag.ContinueOnError)
@@ -28,7 +28,7 @@ func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), e
 	showVersion := flags.Bool("version", false, "print program version")
 	service := flags.Bool("service", false, "run continuously using setup.interval_seconds")
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: anqu [-service] [-version]\nRuns one silent check by default using embedded configuration; -service checks immediately and periodically.")
+		fmt.Fprintln(stderr, "Usage: anqu [-service] [-version]\nReads config.age beside the executable. Runs one silent check by default; -service checks immediately and periodically.")
 	}
 	if err := flags.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -49,7 +49,7 @@ func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), e
 	}
 	data, err := load()
 	if err != nil {
-		fmt.Fprintln(stderr, "embedded configuration unavailable; rebuild this agent using anqu-build on the build server")
+		fmt.Fprintln(stderr, "encrypted configuration unavailable; check config.age beside the agent and its matching public key")
 		return 1
 	}
 	defer clear(data)
@@ -60,7 +60,7 @@ func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), e
 	}
 	cfg, err := audit.ParseConfig(data, filepath.Dir(path))
 	if err != nil {
-		fmt.Fprintln(stderr, "invalid embedded configuration; rebuild this agent on the build server")
+		fmt.Fprintln(stderr, "invalid encrypted YAML configuration; correct and encrypt config.age again")
 		return 1
 	}
 	// Erase the decrypted source buffer as soon as parsing completes. Parsed Go

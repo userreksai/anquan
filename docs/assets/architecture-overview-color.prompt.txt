@@ -1,0 +1,22 @@
+Generation mode: built-in image_gen
+
+Use case: infographic-diagram.
+Create a finished, highly polished, vivid COLORED ILLUSTRATED ARCHITECTURE INFOGRAPHIC in Simplified Chinese for an existing Linux security monitoring system. This is a final poster image for a technical architecture document, understandable at a glance by a nontechnical reader. Wide landscape composition, approximately 16:9, high resolution, all Chinese typography large, crisp and accurate.
+
+Title exact: "Anquan 安全中心架构图"
+Subtitle exact: "节点检测 → 主控处理 → 查看与通知"
+
+Art direction: premium editorial technology illustration, friendly isometric 2.5D server hardware and devices, gently rounded forms, softly shaded volumetric objects, clean infographic organization. Vibrant cobalt BLUE for collection, VIOLET for central processing, emerald GREEN for the dashboard, warm ORANGE for notifications. Very light ivory/white background, ample whitespace, refined subtle shadows and colored accent halos. Draw actual attractive server racks, a shield, a database cylinder, a desktop dashboard monitor, documents, keys, gears and chat notification bubbles. Consistent sophisticated visual language, engaging but professional. Content and arrows dominate, not decoration. Do not make a generic boxed flowchart or Mermaid-like diagram. No code, no monotonous rectangles, no blackboard, no abstract circuit spaghetti, no hacker imagery, no photorealism, no 3D text, no watermark. Do not invent brand logos; simple chat icons plus text labels suffice.
+
+Composition: three spacious left-to-right regions aligned on one main reading axis, with a branching final region. Generous safe outer margins. Large title at top left, small subtitle below. Numbered small circles 01,02,03 next to section headings.
+LEFT BLUE region, heading "节点检测": show a cluster of two or three blue Linux server towers with a clear "Agent" badge. Above or next to them three easy-to-recognize illustrated mini-icons with exact labels "文件变化", "进程变化", "SSH 登录". Under the servers, small folder/report illustration labeled "本地留档", below in one concise line "日志 · 报告 · 指标".
+CENTER VIOLET region, heading "主控处理": one prominent violet server/command hub with shield icon and exact text "Master 主控". Nearby three compact clearly readable labels "登记机器", "在线状态", "事件汇总". Below hub, a database cylinder labeled "SQLite 数据库", sublabel "机器 · 事件 · 通知任务", connected by a short two-headed violet arrow indicating read/write.
+RIGHT region, heading "查看与通知": upper half a GREEN desktop monitor with a simplified attractive dashboard showing server status dots and event cards, not tiny fake text, labeled "Web 管理页面", sublabel "查询事件 · 管理通知". Lower half ORANGE bell and chat bubble illustrations labeled "消息通知", sublabel "飞书 · 企业微信 · Webhook".
+
+Connections, technically exact: a broad clean BLUE arrow from Agent servers to Master, label "UDP 上报", smaller second line "心跳 · 检测事件". A clean two-headed GREEN arrow between Master and Web monitor, label "查询与管理". A distinct ORANGE arrow from Master towards message notifications, label "告警推送". Connectors must have clear direction, intentional routing, no crossing arrows, and never pass through text. Keep local records attached ONLY to Agent, and database attached ONLY to Master. Never draw commands pushed from Master to Agent.
+
+A slender bottom row of two clean, readable annotations, not a wall of tiny footnotes:
+"心跳 30 秒 · 默认巡检 5 分钟"
+"UDP 尽力投递 · 已入库告警通知失败重试"
+
+Render all quoted text verbatim, no extra paragraphs. Preserve correct Chinese words, consistent spacing, and excellent readability. Make it feel like a professionally illustrated explainer suitable for inclusion in a presentation, with an immediately obvious visual narrative.

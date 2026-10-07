@@ -6,6 +6,8 @@ demo/output/
 /anqu
 /config.yaml
 /config.yml
+/.anqu-age-key.txt
+*.age
 /demo/anqu
 
 # Separate master/web repositories developed beside the Agent.
