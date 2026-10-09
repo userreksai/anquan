@@ -50,7 +50,7 @@ func collectMD5(c Config, now time.Time) (MD5Result, *baseline, []Issue) {
 		return r, nil, nil
 	}
 	var old baseline
-	err := readJSON(c.StateFile, &old)
+	err := readBaseline(c, c.StateFile, "md5", &old)
 	first := os.IsNotExist(err)
 	if err != nil && !first {
 		r.Success = false

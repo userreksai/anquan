@@ -63,7 +63,7 @@ func collectSSHLogins(c Config, now time.Time) (LoginResult, *loginBaseline, []I
 	}
 	key := loginDigest(lc.Source + "\x00" + lc.Path)
 	s := &loginBaseline{Version: 1, SourceKey: key, Since: now.Add(-time.Duration(lc.InitialLookbackHours) * time.Hour), Seen: map[string]int{}}
-	err := readJSON(c.StateFile+".logins", s)
+	err := readState(c.StateFile+".logins", "login", s)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return loginFailure(r, fmt.Errorf("read SSH login state: %w", err))
 	}

@@ -2,11 +2,14 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"anqu/internal/audit"
 )
 
 func TestAgentRejectsExternalConfigWithoutLoadingPayload(t *testing.T) {
@@ -94,5 +97,39 @@ func TestAgentFindingsExitTwoAndPreserveRealPathsInReports(t *testing.T) {
 	b, err := os.ReadFile(reports[0])
 	if err != nil || !strings.Contains(string(b), "missing.conf") {
 		t.Fatalf("real path absent from findings: %v", err)
+	}
+}
+
+func TestAgentEachInvocationUsesCurrentConfigAndFreshBaseline(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"first.conf", "second.conf"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(name), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for step, name := range []string{"first.conf", "second.conf", "second.conf"} {
+		var stdout, stderr bytes.Buffer
+		config := "output_dir: output\nFilesMonitoring:\n  fils: [" + name + "]\nlogin:\n  enabled: false\nsetup:\n  logs: logs/agent.log\n  prom: collector/agent.prom\n"
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(strings.Repeat(name, step+1)), 0600); err != nil {
+			t.Fatal(err)
+		}
+		code := run(nil, &stdout, &stderr, func() ([]byte, error) { return []byte(config), nil }, func() (string, error) { return filepath.Join(dir, "anqu"), nil })
+		if code != 0 {
+			t.Fatalf("fresh invocation rejected config/current content: code=%d stderr=%s", code, stderr.String())
+		}
+	}
+	reports, err := filepath.Glob(filepath.Join(dir, "output", "*.json"))
+	if err != nil || len(reports) != 3 {
+		t.Fatalf("missing reports: %v %v", reports, err)
+	}
+	for _, path := range reports {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var report audit.Report
+		if err := json.Unmarshal(data, &report); err != nil || !report.Files.BaselineCreated || len(report.Files.Changes) != 0 {
+			t.Fatalf("invocation reused previous lifetime baseline: %+v %v", report.Files, err)
+		}
 	}
 }

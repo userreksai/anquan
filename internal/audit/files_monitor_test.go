@@ -29,7 +29,7 @@ func filesCollectOK(t *testing.T, c Config) (FilesResult, *filesBaseline) {
 
 func filesCommit(t *testing.T, c Config, next *filesBaseline) {
 	t.Helper()
-	if err := writeJSON(c.StateFile+".files", next, 0600); err != nil {
+	if err := writeState(c.StateFile+".files", "files", next); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -75,7 +75,7 @@ func TestFilesMonitoringRollingRecursiveLifecycle(t *testing.T) {
 	}
 }
 
-func TestFilesMonitoringAllowlistManyToManyAndPersistentMismatch(t *testing.T) {
+func TestFilesMonitoringKnownMD5ManyToManyAndRollingUnknown(t *testing.T) {
 	const abc = "900150983cd24fb0d6963f7d28e17f72"
 	const def = "4ed9407630eb1000c0f6b63842defa7d"
 	const empty = "d41d8cd98f00b204e9800998ecf8427e"
@@ -92,11 +92,12 @@ func TestFilesMonitoringAllowlistManyToManyAndPersistentMismatch(t *testing.T) {
 	put(t, b, "unexpected")
 	for i := 0; i < 2; i++ {
 		r, next = filesCollectOK(t, c)
-		if filesAlertCount(r, "md5_mismatch") != 1 || r.Rules[0].Matched != 1 || r.Rules[0].Mismatched != 1 {
-			t.Fatalf("partial mismatch was lost on scan %d: %+v", i, r)
+		if filesAlertCount(r, "md5_mismatch") != 0 || r.Rules[0].Matched != 1 || r.Rules[0].BaselineTracked != 1 || r.Rules[0].Mismatched != 0 {
+			t.Fatalf("known/unknown accounting failed on scan %d: %+v", i, r)
 		}
-		if len(r.Changes) != 0 {
-			t.Fatalf("fixed allowlist treated as rolling content baseline: %+v", r.Changes)
+		wantChanges := 1 - i
+		if len(r.Changes) != wantChanges || filesAlertCount(r, "modified") != wantChanges {
+			t.Fatalf("known to unknown must alert once, then roll: %+v", r.Changes)
 		}
 		filesCommit(t, c, next)
 	}
@@ -157,8 +158,82 @@ func TestFilesMonitoringSearchAllowlistAndOverlappingRoots(t *testing.T) {
 	put(t, filepath.Join(base, "home", "user", "authorized_keys"), "abc")
 	put(t, filepath.Join(base, "home", "other", "authorized_keys"), "wrong")
 	r, _ := filesCollectOK(t, c)
-	if r.Scanned != 2 || len(r.Items) != 2 || r.Rules[0].Matched != 1 || r.Rules[0].Mismatched != 1 || filesAlertCount(r, "md5_mismatch") != 1 {
-		t.Fatalf("overlapping search duplicated results or bypassed allowlist: %+v", r)
+	if r.Scanned != 2 || len(r.Items) != 2 || r.Rules[0].Matched != 1 || r.Rules[0].BaselineTracked != 1 || r.Rules[0].Mismatched != 0 || len(r.Alerts) != 0 {
+		t.Fatalf("overlapping search duplicated results or rejected initial unknown: %+v", r)
+	}
+}
+
+func TestFilesMonitoringKnownOrPerFileBaselineForEveryRuleKind(t *testing.T) {
+	const known = ",68b329da9893e34099c7d8ad5cb9c940,900150983cd24fb0d6963f7d28e17f72"
+	for _, kind := range []string{"fils", "dir", "search"} {
+		t.Run(kind, func(t *testing.T) {
+			paths := []string{"root/.ssh/authorized_keys", "home/alice/.ssh/authorized_keys", "var/lib/app/authorized_keys"}
+			monitoring := FilesMonitoringConfig{}
+			switch kind {
+			case "fils":
+				monitoring.Fils = []string{strings.Join(paths, "|") + known}
+			case "dir":
+				monitoring.Dir = []string{"root|home/|var/" + known}
+			case "search":
+				monitoring.Search = []string{"authorized_keys,root|home/|var/" + known}
+			}
+			c := filesTestConfig(t, monitoring)
+			for i := range paths {
+				paths[i] = filepath.Join(filepath.Dir(c.OutputDir), filepath.FromSlash(paths[i]))
+			}
+			put(t, paths[0], "\n")
+			put(t, paths[1], "abc")
+			put(t, paths[2], "unknown-initial")
+			if kind == "search" {
+				put(t, paths[2]+".bak", "must not be monitored")
+			}
+			initial, next := filesCollectOK(t, c)
+			if initial.Scanned != 3 || len(next.Files) != 3 || len(initial.Alerts) != 0 || initial.Rules[0].Matched != 2 || initial.Rules[0].BaselineTracked != 1 || initial.Rules[0].Mismatched != 0 {
+				t.Fatalf("known files must not hide initial unknown baseline: %+v", initial)
+			}
+			for _, item := range initial.Items {
+				want := "matched"
+				if item.Path == paths[2] {
+					want = "baseline_created"
+				}
+				if item.Status != want || next.Files[item.Path] != item.MD5 || len(item.ExpectedMD5) != 2 {
+					t.Fatalf("file result/baseline missing: %+v", item)
+				}
+			}
+			filesCommit(t, c, next)
+			for _, step := range []struct {
+				name, content string
+				index         int
+				modified      bool
+			}{
+				{"unknown unchanged", "unknown-initial", 2, false},
+				{"unknown changes despite other known matches", "unknown-next", 2, true},
+				{"unknown change reported only once", "unknown-next", 2, false},
+				{"known to another known", "abc", 0, false},
+				{"unknown to known", "\n", 2, false},
+				{"another file's learned hash is not globally trusted", "unknown-next", 0, true},
+				{"known to unknown", "unknown-initial", 2, true},
+			} {
+				t.Run(step.name, func(t *testing.T) {
+					path := paths[step.index]
+					before := next.Files[path]
+					put(t, path, step.content)
+					r, observed := filesCollectOK(t, c)
+					want := 0
+					if step.modified {
+						want = 1
+					}
+					if len(r.Alerts) != want || len(r.Changes) != want || filesAlertCount(r, "md5_mismatch") != 0 {
+						t.Fatalf("unexpected content alert: %+v", r)
+					}
+					if want == 1 && (r.Changes[0].Kind != "modified" || r.Changes[0].Path != path || r.Changes[0].Before != before || r.Changes[0].After != observed.Files[path]) {
+						t.Fatalf("wrong path or before/after MD5: %+v", r.Changes)
+					}
+					filesCommit(t, c, observed)
+					next = observed
+				})
+			}
+		})
 	}
 }
 
@@ -178,7 +253,7 @@ func TestFilesMonitoringOverlappingRulesHaveUniqueItemIdentity(t *testing.T) {
 	}
 }
 
-func TestFilesMonitoringOverlappingAutoAndFixedPolicies(t *testing.T) {
+func TestFilesMonitoringOverlappingBaselineAndKnownMD5Policies(t *testing.T) {
 	c := filesTestConfig(t, FilesMonitoringConfig{Dir: []string{"watched"}, Fils: []string{"watched/file,900150983cd24fb0d6963f7d28e17f72"}})
 	p := filepath.Join(filepath.Dir(c.OutputDir), "watched", "file")
 	put(t, p, "abc")
@@ -189,13 +264,13 @@ func TestFilesMonitoringOverlappingAutoAndFixedPolicies(t *testing.T) {
 	filesCommit(t, c, next)
 	put(t, p, "changed")
 	r, next = filesCollectOK(t, c)
-	if filesAlertCount(r, "modified") != 1 || filesAlertCount(r, "md5_mismatch") != 1 {
-		t.Fatalf("both explicit policies must be enforced: %+v", r)
+	if filesAlertCount(r, "modified") != 1 || len(r.Alerts) != 1 {
+		t.Fatalf("overlapping rules must emit one change: %+v", r)
 	}
 	filesCommit(t, c, next)
 	r, _ = filesCollectOK(t, c)
-	if len(r.Changes) != 0 || filesAlertCount(r, "md5_mismatch") != 1 {
-		t.Fatalf("allowlist must stay fixed when overlapping auto baseline rolls: %+v", r)
+	if len(r.Changes) != 0 || len(r.Alerts) != 0 {
+		t.Fatalf("unchanged unknown content must not repeat an alert: %+v", r)
 	}
 }
 
@@ -297,7 +372,9 @@ func TestFilesMonitoringInvalidBaselinePreserved(t *testing.T) {
 			_, next := filesCollectOK(t, c)
 			switch bad {
 			case "malformed":
-				put(t, c.StateFile+".files", "{broken")
+				if err := writeEncryptedState(c.StateFile+".files", "files", []byte("{broken")); err != nil {
+					t.Fatal(err)
+				}
 			case "wrong-hash":
 				next.Files[root] = "bad-hash"
 				filesCommit(t, c, next)

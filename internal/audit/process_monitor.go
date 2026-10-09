@@ -196,7 +196,7 @@ func collectProcessMonitoringWithScanner(c Config, now time.Time, scan func() (m
 		return r, nil, nil
 	}
 	var old processBaseline
-	err = readJSON(c.StateFile+".processes", &old)
+	err = readBaseline(c, c.StateFile+".processes", "processes", &old)
 	first := os.IsNotExist(err)
 	if err != nil && !first {
 		return fail("read process baseline: " + err.Error())

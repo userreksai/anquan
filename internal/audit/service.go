@@ -14,7 +14,7 @@ import (
 // Collection failures are recorded and retried; SIGTERM cancellation stops the
 // schedule after the current bounded collection finishes.
 func Serve(ctx context.Context, c Config, writer io.Writer, version string) error {
-	return serve(ctx, c, writer, version, func(c Config, writer io.Writer) (Report, OutputPaths, error) {
+	return serve(ctx, NewSession(c), writer, version, func(c Config, writer io.Writer) (Report, OutputPaths, error) {
 		return runWithWriter(c, writer, false)
 	})
 }
@@ -53,6 +53,12 @@ func serveWithHeartbeatInterval(ctx context.Context, c Config, writer io.Writer,
 		heartbeatLoop(heartbeatCtx, c, writer, version, heartbeatInterval)
 	}()
 	defer func() { cancelHeartbeat(); <-heartbeatDone }()
+	historyDone := make(chan struct{})
+	go func() {
+		defer close(historyDone)
+		historyLoop(heartbeatCtx, c, writer)
+	}()
+	defer func() { cancelHeartbeat(); <-historyDone }()
 	ticker := time.NewTicker(c.Interval())
 	defer ticker.Stop()
 	for {

@@ -14,7 +14,7 @@ import (
 	"anqu/internal/sealed"
 )
 
-const version = "0.4.0"
+const version = "0.6.0"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, sealed.Config, os.Executable))
@@ -79,13 +79,17 @@ func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), e
 		fmt.Fprintln(stderr, "cannot write startup log:", err)
 		return 1
 	}
-	report, _, err := audit.RunWithWriter(cfg, stdout)
+	report, _, err := audit.RunWithWriter(audit.NewSession(cfg), stdout)
 	if err != nil {
 		fmt.Fprintln(stderr, "audit could not complete; check output access and task status")
 		return 1
 	}
 	if !report.Success {
 		fmt.Fprintf(stderr, "audit collection failed (%d errors); see generated report\n", len(report.Errors))
+		return 1
+	}
+	if _, err := audit.PollHistory(cfg, stdout); err != nil {
+		_ = audit.LifecycleLog(cfg, stdout, "history_error", map[string]string{"error": err.Error()})
 		return 1
 	}
 	if len(report.Alerts) > 0 {

@@ -52,16 +52,17 @@ type FilesResult struct {
 	Alerts          []Alert           `json:"alerts"`
 }
 
-// Each rule reports its own allowlist totals so a partially matched multi-path
-// entry remains visible even when other rules succeed.
+// Each rule reports known MD5 matches separately from files tracked by baseline.
 type FileRuleResult struct {
-	Rule         string   `json:"rule"`
-	Paths        []string `json:"paths"`
-	Mode         string   `json:"mode"`
-	Scanned      int      `json:"scanned"`
-	Matched      int      `json:"matched"`
-	Mismatched   int      `json:"mismatched"`
-	MissingRoots int      `json:"missing_roots"`
+	Rule            string   `json:"rule"`
+	Paths           []string `json:"paths"`
+	Mode            string   `json:"mode"`
+	Scanned         int      `json:"scanned"`
+	Matched         int      `json:"matched"`
+	BaselineTracked int      `json:"baseline_tracked"`
+	// Retained for report compatibility. Unknown hashes use the baseline now.
+	Mismatched   int `json:"mismatched"`
+	MissingRoots int `json:"missing_roots"`
 }
 
 type filesBaseline struct {
@@ -185,7 +186,7 @@ func collectFilesMonitoring(c Config, now time.Time) (FilesResult, *filesBaselin
 		return r, nil, issues
 	}
 	var old filesBaseline
-	err := readJSON(c.StateFile+".files", &old)
+	err := readBaseline(c, c.StateFile+".files", "files", &old)
 	first := os.IsNotExist(err)
 	if err != nil && !first {
 		addError(c.StateFile+".files", "read baseline: "+err.Error())
@@ -211,7 +212,7 @@ func collectFilesMonitoring(c Config, now time.Time) (FilesResult, *filesBaselin
 	for _, rule := range c.FilesMonitoring.rules {
 		mode := "baseline"
 		if len(rule.Hashes) > 0 {
-			mode = "allowlist"
+			mode = "allowlist_or_baseline"
 		}
 		ruleLabel := rule.Kind
 		if rule.Name != "" {
@@ -306,21 +307,22 @@ func collectFilesMonitoring(c Config, now time.Time) (FilesResult, *filesBaselin
 				}
 				item.MD5 = hash
 				summary.Scanned++
-				if mode == "allowlist" {
-					item.Status = "mismatch"
-					for _, allowed := range rule.Hashes {
-						if hash == allowed {
-							item.Status = "matched"
-							break
-						}
+				known := false
+				for _, allowed := range rule.Hashes {
+					if hash == allowed {
+						known = true
+						break
 					}
-					if item.Status == "mismatch" {
-						summary.Mismatched++
-						r.Alerts = append(r.Alerts, Alert{Module: "files", Kind: "md5_mismatch", Target: p, Message: "current MD5 does not match any configured allowed value", Before: strings.Join(rule.Hashes, ","), After: hash})
-					} else {
-						summary.Matched++
-					}
+				}
+				if known {
+					// Any configured hash is accepted for this rule, even when it
+					// differs from this path's previously observed content.
+					item.Status = "matched"
+					summary.Matched++
 				} else {
+					// Unknown hashes are tracked independently by full path. Never
+					// add them to the configured known set for other files.
+					summary.BaselineTracked++
 					automatic[p] = true
 					before, existed := old.Files[p]
 					switch {

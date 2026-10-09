@@ -38,6 +38,9 @@ func runWithWriter(c Config, writer io.Writer, startupHeartbeat bool) (r Report,
 		return r, paths, err
 	}
 	defer unlock()
+	if err := prepareSession(c); err != nil {
+		return r, paths, err
+	}
 	r.StartedAt = time.Now().In(c.location)
 	paths.Log = logPath(c, r.StartedAt)
 	if err := writeLog(c, writer, r.StartedAt, "scan_started", map[string]string{"state_file": c.StateFile}); err != nil {
@@ -129,10 +132,12 @@ func runWithWriter(c Config, writer io.Writer, startupHeartbeat bool) (r Report,
 	}
 	stateFailure := false
 	for _, item := range commits {
-		if err := writeJSON(item.path, item.data, 0600); err != nil {
+		if err := writeState(item.path, item.module, item.data); err != nil {
 			stateFailure, r.Success = true, false
 			item.failed()
 			r.Errors = append(r.Errors, Issue{item.module, "save baseline: " + err.Error()})
+		} else if c.session != nil {
+			c.session.committed[item.module] = true
 		}
 	}
 	if stateFailure {

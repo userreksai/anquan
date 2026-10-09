@@ -22,11 +22,9 @@ func saveLoginState(t *testing.T, c Config, s *loginBaseline) {
 	if s == nil {
 		t.Fatal("missing login state")
 	}
-	b, err := json.Marshal(s)
-	if err != nil {
+	if err := writeState(c.StateFile+".logins", "login", s); err != nil {
 		t.Fatal(err)
 	}
-	put(t, c.StateFile+".logins", string(b))
 }
 
 func loginJSON(user, id string, at time.Time) string {

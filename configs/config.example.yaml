@@ -16,15 +16,17 @@ FilesMonitoring:
     - /etc/ssh/sshrc
     - /etc/hosts.allow
     # 如目标系统没有上述文件，会产生 missing 日志和告警，请按需求保留或移除。
-    # 固定允许值示例：用目标文件的实际 md5sum 替换下面三个演示值后启用。
-    # 两个文件分别匹配任意一个允许值即可，MD5 数量不必与路径数量相同。
+    # 已知正常值示例：用实际 md5sum 替换下面三个演示值后启用。
+    # 每个文件命中任意值即正常；未知 MD5 初始化时记录，之后变化才告警。
+    # MD5 数量不必与路径数量相同，未知值按文件路径独立跟踪。
     # - /opt/app/a.conf|/opt/app/b.conf,d41d8cd98f00b204e9800998ecf8427e,900150983cd24fb0d6963f7d28e17f72,5d41402abc4b2a76b9719d911017c592
   dir:
     - /etc/cron.d/           # 递归计算目录内普通文件，记录新增、修改、删除
   search:
     - authorized_keys,/root|/home/|/var/
     - id_rsa,/root|/home/|/var/
-    # 搜索指定文件名并校验允许值的格式（以下 MD5 仍需替换）：
+    # 三种文件规则采用同一逻辑：已知 MD5 放行，未知 MD5 建基线并监控变化。
+    # 搜索精确文件名并设置已知 MD5 的格式（以下值仍需替换）：
     # - authorized_keys,/root|/home|/var,d41d8cd98f00b204e9800998ecf8427e,900150983cd24fb0d6963f7d28e17f72
 
 ProcessMonitoring:
@@ -42,6 +44,14 @@ ProcessMonitoring:
   #   whitelist:
   #     - /usr/sbin/sshd -D
   # 白名单仅按完整命令精确匹配（不支持通配符/正则），且不会免除 exists 检查。
+
+# 开启前先填写 server，并更新支持命令确认应答的 Master。
+history:
+  enabled: false            # 改为 true 开启；首次补传已有命令，此后增量读取
+  path: /var/log/history.log
+  timezone: Local           # 与 history-audit.sh 中 date 使用的时区一致
+  poll_interval_ms: 1000    # 默认每秒读取，独立于 setup.interval_seconds
+  max_records: 100          # 积压时连续分批补传，不限制总记录数
 
 login:
   enabled: true
