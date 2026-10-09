@@ -24,6 +24,7 @@ type Config struct {
 	Timezone          string                   `json:"timezone" yaml:"timezone"`
 	MD5               MD5Config                `json:"md5" yaml:"md5"`
 	Login             LoginConfig              `json:"login" yaml:"login"`
+	History           *HistoryConfig           `json:"history,omitempty" yaml:"history,omitempty"`
 	Existence         ExistenceConfig          `json:"existence" yaml:"existence"`
 	FilesMonitoring   *FilesMonitoringConfig   `json:"FilesMonitoring,omitempty" yaml:"FilesMonitoring,omitempty"`
 	ProcessMonitoring *ProcessMonitoringConfig `json:"ProcessMonitoring,omitempty" yaml:"ProcessMonitoring,omitempty"`
@@ -31,6 +32,7 @@ type Config struct {
 	AgentIP           string                   `json:"agent_ip,omitempty" yaml:"agent_ip,omitempty"`
 	Setup             *SetupConfig             `json:"setup,omitempty" yaml:"setup,omitempty"`
 	location          *time.Location
+	session           *baselineSession
 }
 
 type MD5Config struct {
@@ -78,7 +80,7 @@ func decodeYAML(data []byte) (Config, error) {
 	if err := yaml.Unmarshal(data, &keys); err != nil {
 		return c, fmt.Errorf("YAML configuration: %w", err)
 	}
-	for _, key := range []string{"FilesMonitoring", "ProcessMonitoring", "server", "setup"} {
+	for _, key := range []string{"FilesMonitoring", "ProcessMonitoring", "server", "setup", "history"} {
 		if value, exists := keys[key]; exists {
 			if value.Tag == "!!null" {
 				return c, fmt.Errorf("%s cannot be null; omit the field to disable it", key)
@@ -355,6 +357,9 @@ func normalizeConfig(c Config, base string, rules pathRules) (Config, error) {
 	if err := normalizeMonitoring(&c, base, rules); err != nil {
 		return c, err
 	}
+	if err := normalizeHistory(&c, base, rules); err != nil {
+		return c, err
+	}
 	return c, nil
 }
 
@@ -396,12 +401,16 @@ func validateChecks(c ExistenceConfig, rules pathRules) ([]CheckEntry, error) {
 	return entries, nil
 }
 
-// readJSON reads internal reports/baselines only, never user configuration.
+// readJSON reads plaintext reports, never encrypted state or user configuration.
 func readJSON(path string, target any) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
+	return decodeJSON(path, b, target)
+}
+
+func decodeJSON(path string, b []byte, target any) error {
 	b = bytes.TrimPrefix(b, []byte{0xef, 0xbb, 0xbf})
 	d := json.NewDecoder(bytes.NewReader(b))
 	d.DisallowUnknownFields()

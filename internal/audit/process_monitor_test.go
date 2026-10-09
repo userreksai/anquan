@@ -29,7 +29,7 @@ func TestProcessMonitoringInitialAndRollingCounts(t *testing.T) {
 	if _, err := os.Stat(c.StateFile + ".processes"); !os.IsNotExist(err) {
 		t.Fatalf("collector wrote state before report publication: %v", err)
 	}
-	if err := writeJSON(c.StateFile+".processes", next, 0600); err != nil {
+	if err := writeState(c.StateFile+".processes", "processes", next); err != nil {
 		t.Fatal(err)
 	}
 	updated := map[string]int{"/usr/bin/worker": 1, "/usr/bin/new": 2}
@@ -42,7 +42,7 @@ func TestProcessMonitoringInitialAndRollingCounts(t *testing.T) {
 	if len(issues) != 0 || !r.Success || r.BaselineCreated || !reflect.DeepEqual(r.Changes, want) || len(r.Alerts) != 3 || next == nil {
 		t.Fatalf("changed snapshot: result=%+v next=%+v issues=%+v", r, next, issues)
 	}
-	if err := writeJSON(c.StateFile+".processes", next, 0600); err != nil {
+	if err := writeState(c.StateFile+".processes", "processes", next); err != nil {
 		t.Fatal(err)
 	}
 	r, next, issues = collectProcessMonitoringWithScanner(c, now.Add(2*time.Minute), processFixtureScanner(updated))
@@ -89,7 +89,7 @@ func TestProcessWhitelistSuppressesChangesButNotExists(t *testing.T) {
 	if len(issues) != 0 || next == nil || r.Missing != 0 || len(r.Inventory) != 2 || !r.Inventory[1].Whitelisted || len(next.Processes) != 1 {
 		t.Fatalf("initial whitelist result: %+v %+v %+v", r, next, issues)
 	}
-	if err := writeJSON(c.StateFile+".processes", next, 0600); err != nil {
+	if err := writeState(c.StateFile+".processes", "processes", next); err != nil {
 		t.Fatal(err)
 	}
 	r, _, issues = collectProcessMonitoringWithScanner(c, now.Add(time.Minute), processFixtureScanner(map[string]int{"/usr/bin/worker": 1}))
@@ -106,7 +106,7 @@ func TestProcessScanFailurePreservesBaseline(t *testing.T) {
 	c := processTestConfig(t)
 	c.ProcessMonitoring.Exists = []string{"/usr/sbin/sshd -D"}
 	_, baseline, _ := collectProcessMonitoringWithScanner(c, time.Now(), processFixtureScanner(map[string]int{"/usr/sbin/sshd -D": 1}))
-	if err := writeJSON(c.StateFile+".processes", baseline, 0600); err != nil {
+	if err := writeState(c.StateFile+".processes", "processes", baseline); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.ReadFile(c.StateFile + ".processes")
@@ -129,7 +129,7 @@ func TestProcessInvalidBaselineDoesNotReset(t *testing.T) {
 	for _, invalid := range []string{"{", `{"version":1,"scope":"wrong","processes":{}}`} {
 		t.Run(invalid, func(t *testing.T) {
 			c := processTestConfig(t)
-			if err := os.WriteFile(c.StateFile+".processes", []byte(invalid), 0600); err != nil {
+			if err := writeEncryptedState(c.StateFile+".processes", "processes", []byte(invalid)); err != nil {
 				t.Fatal(err)
 			}
 			r, next, issues := collectProcessMonitoringWithScanner(c, time.Now(), processFixtureScanner(map[string]int{"/usr/bin/worker": 1}))

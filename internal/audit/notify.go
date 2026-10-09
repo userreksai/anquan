@@ -13,13 +13,14 @@ import (
 // Version 1 remains additive: old masters may ignore ip and new summary fields.
 // Each datagram is one complete event, not a batch or a fragment.
 type udpEnvelope struct {
-	Version int             `json:"version"`
-	EventID string          `json:"event_id"`
-	IP      string          `json:"ip"`
-	Host    string          `json:"host"`
-	Time    time.Time       `json:"time"`
-	Type    string          `json:"type"`
-	Data    json.RawMessage `json:"data"`
+	Version      int             `json:"version"`
+	EventID      string          `json:"event_id"`
+	IP           string          `json:"ip"`
+	Host         string          `json:"host"`
+	Time         time.Time       `json:"time"`
+	Type         string          `json:"type"`
+	Data         json.RawMessage `json:"data"`
+	AckRequested bool            `json:"ack_requested,omitempty"`
 }
 
 func udpMessages(c Config, r Report, ip string) ([][]byte, error) {
@@ -78,7 +79,7 @@ func encodeUDPEvent(ip, host, kind string, at time.Time, stableID string, data a
 		identity = append(identity, body...)
 	}
 	id := sha256.Sum256(identity)
-	return json.Marshal(udpEnvelope{1, hex.EncodeToString(id[:]), ip, host, at, kind, body})
+	return json.Marshal(udpEnvelope{Version: 1, EventID: hex.EncodeToString(id[:]), IP: ip, Host: host, Time: at, Type: kind, Data: body})
 }
 
 // NotifyHeartbeat announces this agent without waiting for file/process/login

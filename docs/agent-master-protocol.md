@@ -24,9 +24,10 @@ setup:
 | `event_id` | string | SHA-256 十六进制事件标识；持久化事件按 `(ip,event_id)` 唯一存储，心跳只更新机器状态 |
 | `ip` | string | 被监控机器 IP；旧报文可回退 UDP 来源地址 |
 | `host` | string | 被监控机器主机名 |
-| `time` | RFC3339 string | 心跳为发送时间；告警/摘要为扫描开始时间；登录为真实发生时间，带时区 |
-| `type` | string | `heartbeat`、`scan_summary`、`alert`、`ssh_login` |
+| `time` | RFC3339 string | 心跳为发送时间；告警/摘要为扫描开始时间；登录/操作命令为真实发生时间，带时区 |
+| `type` | string | `heartbeat`、`scan_summary`、`alert`、`ssh_login`、`command_history` |
 | `data` | object | 对应类型的数据 |
+| `ack_requested` | boolean | 可选，默认 false；为 true 时 Master 成功提交后回复 ACK |
 
 主控应另存 `received_at` 作为接收时间。按登录发生时间筛选时使用 `data.login_time`，避免首次补读、积压和延迟报文落入接收当天；机器在线状态应按接收时间更新。
 
@@ -58,7 +59,7 @@ Master 收到首条有效心跳或检测事件时，按机器 IP 自动创建记
 
 旧 Agent 仍可只发送 `scan_summary`：没有收到独立心跳的机器使用 `max(扫描周期 × 3, 120)` 秒作为离线阈值，默认扫描 300 秒对应 900 秒，避免正常巡检间隔被误判离线。收到新 Agent 的独立心跳后自动使用心跳阈值。
 
-数据库初始化或打开旧库时，Master 自动迁移 SQLite schema 到 `PRAGMA user_version=2`，为 `machines` 增加 `heartbeat_interval_seconds`、`last_heartbeat_at`，保留原有机器信息、事件、管理员密码、登录会话、webhook 配置和通知队列。数据库版本与 UDP 协议 `version: 1` 相互独立。
+数据库初始化或打开旧库时，Master 自动迁移 SQLite schema 到 `PRAGMA user_version=3`。v2 增加机器心跳字段；v3 扩展事件类型及命令来源 ID 去重索引。迁移保留机器信息、事件 ID、处理状态/备注、管理员密码、登录会话、webhook 配置及通知队列的重试记录和 ID 高水位。数据库版本与 UDP 协议 `version: 1` 相互独立。
 
 ## 扫描摘要
 
@@ -109,7 +110,7 @@ Master 收到首条有效心跳或检测事件时，按机器 IP 自动创建记
 }
 ```
 
-`target` 是异常文件路径、搜索规则或进程命令。文件常见类型为 `added`、`modified`、`deleted`、`missing`、`not_found`、`md5_mismatch`；检查失败可为 `inspection_error` 或 `collection_error`。`before` / `after` 可省略：修改保存前后 MD5，删除只有旧 MD5，新增只有新 MD5；允许列表不匹配保存允许值与当前值。主控应保存原始 `data`，不要把其他模块的这两个字段强制解释为 MD5。
+`target` 是异常文件路径、搜索规则或进程命令。文件常见类型为 `added`、`modified`、`deleted`、`missing`、`not_found`；检查失败可为 `inspection_error` 或 `collection_error`。从 Agent v0.5.1 起，fils/dir/search 命中任意配置 MD5 即正常，未知 MD5 初始化时记录为该路径的基线，之后变成另一个未知值产生 `modified`，不再仅因未命中配置值产生 `md5_mismatch`。主控仍可接收旧版 Agent 的 `md5_mismatch`。`before` / `after` 可省略：修改保存前后 MD5，删除只有旧 MD5，新增只有新 MD5；旧版允许列表不匹配保存允许值与当前值。主控应保存原始 `data`，不要把其他模块的这两个字段强制解释为 MD5。
 
 ## 每次 SSH 成功登录
 
@@ -134,8 +135,47 @@ Master 收到首条有效心跳或检测事件时，按机器 IP 自动创建记
 
 `ip` 是被登录机器，`source_ip` 是登录来源，两者不可混用。来源没有终端时 `terminal` 为 `N/A`。生产默认读取 journal 成功认证记录，支持非交互 SSH；wtmp 只能覆盖操作系统写入的会话。
 
+Master v0.6.0 将新入库的 `ssh_login` 与通知任务在同一事务提交，向全部已启用 webhook 发送登录通知。正文保留机器、主机名、用户、来源 IP、终端、认证方式、真实登录时间和事件 ID。重复事件及相同来源 ID 的登录不重复入队，数据库中已有历史记录不补发；补读/延迟上报的登录首次入库时仍通知。通知失败沿用持久重试，重启后继续发送。
+
+## 操作命令及落库确认（v0.6.0）
+
+```json
+{
+  "version": 1,
+  "event_id": "c530bd810e792eec8fe41d4b307878d84691c9a6febea5c9864bd471f0115413",
+  "ip": "172.22.0.101",
+  "host": "node-a",
+  "time": "2026-10-09T02:42:50+08:00",
+  "type": "command_history",
+  "ack_requested": true,
+  "data": {
+    "id": "stable-source-record-id",
+    "command_time": "2026-10-09T02:42:50+08:00",
+    "user": "root",
+    "terminal": "/dev/pts/1",
+    "command": "alias ll='ls -alF'",
+    "path": "/var/log/history.log",
+    "offset": 0
+  }
+}
+```
+
+来源文件从头补传，之后按字节位置读取追加记录。`id` 由持久化的日志代号和记录起始字节位置生成；相同文本、用户及时间的两次操作仍有不同 ID。Master 使用 `command_time` 作为事件发生时间，保存原始 `data`，并额外按 `(机器 IP, command id)` 去重，因此主机名改变后重试也不重复入库。机器 IP 改变会形成另一台机器。`GET /api/events?type=command_history` 支持现有机器、时间、关键字、状态及分页参数。正常命令事件不进入告警 webhook 队列。
+
+当信封带 `ack_requested: true`，Master 在数据库事务成功提交后向报文来源地址回复：
+
+```json
+{"version":1,"type":"ack","event_id":"c530bd810e792eec8fe41d4b307878d84691c9a6febea5c9864bd471f0115413"}
+```
+
+重复事件也回复匹配原报文 `event_id` 的 ACK。格式/校验错误或落库失败不确认。Agent 每条最多等待 2 秒，未收到匹配确认则保留加密 `.commands` 中的待发批次，随后重试；重启仍使用相同 ID。每个配置的 Master 均确认后才清空该批次。此机制为至少一次传输、主控幂等入库；依赖保留 Agent 状态和 Master 数据库。网络须允许 UDP 请求及返回流量。
+
+命令采集按单行日志解析；非法格式及无法容纳于 UDP 的记录以 `alert` 上报，`module: history`、`kind: parse_error`、`target: 来源日志`，描述包含字节位置，并同样请求 ACK。文件读取/状态错误写 Agent 本机 `history_error` 日志。Agent 不修改或清理源日志。
+
+升级顺序为 Master、Web、Agent；旧 Master 不支持 `command_history` 或落库 ACK，新 Agent 会保留待发数据并持续等待，不会把发送成功当作落库成功。
+
 ## 重复、持久化与投递边界
 
 同一报告构造相同的事件 ID，多个 UDP 副本按 `(ip,event_id)` 去重。登录使用机器 IP、主机名、事件类型与来源记录 `id` 生成标识，同一登录跨扫描重新读取保持相同标识；不同来源 ID 的两次登录即使用户/IP/时间完全相同也会分别保留。没有来源 ID 的兼容记录按其原始时间和内容生成标识。告警与摘要按扫描时间和内容生成标识，持续缺失在下轮仍产生新记录；文件变化因本地发布失败而跨轮重新检测，也可能形成新的告警观察记录。
 
-UDP 没有 ACK、自动重传或持久发送队列。成功发送只表示本地网络栈接受，不代表主控已存储；网络丢包、主控停机或超大数据报可能导致主控缺少某些记录。通知失败写入本机报告，完整检测证据仍留在 Agent 日志/报告中。主控必须在数据库成功写入新事件后再触发 webhook，重复事件不应重复通知。
+常规巡检告警、登录、摘要和心跳的 Agent → Master 传输没有 ACK 或持久重传。成功发送只表示本地网络栈接受，不代表主控已存储；网络丢包、主控停机或超大数据报可能导致缺记录。命令采集通道采用上述落库确认及持久重试。Master → webhook 的告警及登录通知在入库后采用持久重试，重复事件不重复入队。
