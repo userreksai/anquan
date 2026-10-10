@@ -102,7 +102,7 @@ func runWithWriter(c Config, writer io.Writer, startupHeartbeat bool) (r Report,
 		Log:    logPath(c, r.StartedAt),
 	}
 	if c.Setup != nil {
-		paths.Prom = datedOutput(c.Setup.Prom, r.StartedAt, false)
+		paths.Prom = c.Setup.Prom
 	}
 	if err := publish(r, paths, c.MonitoringMode()); err != nil {
 		return r, paths, err
@@ -164,7 +164,7 @@ func publish(r Report, paths OutputPaths, historical ...bool) error {
 		archive = snapshotMetrics(r, b)
 	}
 	if err := atomicWrite(paths.Prom, archive, 0644); err != nil {
-		return fmt.Errorf("write archive metrics: %w", err)
+		return fmt.Errorf("write metrics: %w", err)
 	}
 	if err := atomicWrite(paths.Latest, b, 0644); err != nil {
 		return fmt.Errorf("write latest metrics: %w", err)

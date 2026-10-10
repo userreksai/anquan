@@ -127,8 +127,8 @@ func metrics(r Report) []byte {
 	return []byte(b.String())
 }
 
-// Retained .prom files share a collector directory. Give each snapshot its own
-// series and metric namespace so it cannot collide with another scan or latest.
+// Monitoring metrics retain their collection identity and separate namespace
+// so they can share a collector directory with latest-state metrics.
 func snapshotMetrics(r Report, source []byte) []byte {
 	var out strings.Builder
 	labels := "host=" + label(r.Host) + ",run_id=" + label(r.StartedAt.Format(time.RFC3339Nano))

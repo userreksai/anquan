@@ -1,6 +1,6 @@
 # Anqu 安全检测 Agent（v0.4.0）
 
-Anqu 在 Linux 节点持续检查文件 MD5、文件增删和进程变化，并逐条记录成功的 SSH 登录。服务启动时记录当前时间，每轮输出当前主机的完整检测结果、告警、JSON 报告和一份带采集时间的 Prometheus 文件。运行日志按北京时间零点切换文件。
+Anqu 在 Linux 节点持续检查文件 MD5、文件增删和进程变化，并逐条记录成功的 SSH 登录。服务启动时记录当前时间，每轮输出当前主机的完整检测结果、告警、JSON 报告，并更新固定路径的 Prometheus 文件。运行日志按北京时间零点切换文件。
 
 本目录是 [anquan Agent](https://github.com/userreksai/anquan)。Agent 通过可配置的 UDP 接口向 [Master 主控](https://github.com/userreksai/anquan-server-master) 上报，默认关闭联网。详细需求对应关系见 [需求与实现说明](docs/需求与实现说明.md)，字段约定见 [Agent / Master 协议](docs/agent-master-protocol.md)。
 
@@ -90,7 +90,7 @@ server: []
 
 setup:
   logs: /var/log/时间anquan.log
-  prom: /var/lib/node_exporter/textfile_collector/时间process_monitor.prom
+  prom: /var/lib/node_exporter/textfile_collector/process_monitor.prom
   interval_seconds: 300
 ```
 
@@ -183,7 +183,7 @@ JSONL 示例：
 |---|---|
 | `/var/log/20261002anquan.log` | 北京时间当天的 JSONL 日志，零点自动换文件 |
 | `/usr/local/anqu/20261002_100000.123456789+0800.json` | 单轮完整检测报告 |
-| `/var/lib/node_exporter/textfile_collector/20261002_100000.123456789+0800process_monitor.prom` | 单轮指标快照；每次执行都会生成新文件 |
+| `/var/lib/node_exporter/textfile_collector/process_monitor.prom` | 最近一轮指标；每次采集原子覆盖同一个文件 |
 | `/usr/local/anqu/textfile/anqu.prom` | 固定文件名的最新状态指标 |
 | `/usr/local/anqu/state/md5.json` | 旧 `md5` 模块的加密基线（启用时） |
 | `/usr/local/anqu/state/md5.json.files` | 加密的文件 MD5 和成员清单滚动基线 |
@@ -194,15 +194,15 @@ JSONL 示例：
 
 本次加密范围是配置和内部状态。巡检 JSON 报告、日志、Prometheus 指标仍按原格式供运维和采集系统读取，其中会包含路径、MD5 和检测结果；节点管理员仍可能从程序或内存恢复密钥。
 
-`setup.logs` 中的 `时间` 或 `{date}` 替换为北京时间 `YYYYMMDD`，禁止 `{time}`，始终按北京时间日切。`setup.prom` 的 `时间` / `{time}` 替换为含纳秒的采集时间；即使仅写 `{date}` 也自动补足本轮时间，避免覆盖。没有占位符时自动添加日期或采集时间前缀。占位符只允许出现在文件名；配置目录时会补默认文件名。`timezone` 可控制报告显示，但不改变日志零点切割规则。
+`setup.logs` 中的 `时间` 或 `{date}` 替换为北京时间 `YYYYMMDD`，禁止 `{time}`，始终按北京时间日切；没有占位符时自动添加日期前缀。`setup.prom` 使用固定文件名，每轮采集后通过临时文件加重命名原子替换，不追加内容或生成时间命名的新文件。为兼容旧配置，prom 文件名中的 `时间`、`{date}`、`{time}` 会被移除。占位符只允许出现在文件名；配置目录时，日志补 `时间anquan.log`，指标补 `process_monitor.prom`。`timezone` 可控制报告显示，但不改变日志零点切割规则。
 
-每轮快照使用 `anqu_snapshot_` 指标前缀，并给每条样本增加 `host` 和 `run_id` 标签，因此同一 textfile 目录保留多轮快照不会产生相同标签集合的重复样本。最新状态继续使用 `anqu_` 前缀。生产告警通常查询最新状态：
+`setup.prom` 保留 `anqu_snapshot_` 指标前缀以及 `host`、`run_id` 标签，文件内容只保留最近一轮结果。`output_dir/textfile/anqu.prom` 继续使用 `anqu_` 前缀和稳定的标签集合，生产告警通常查询这里的最新状态：
 
 ```text
 --collector.textfile.directory=/usr/local/anqu/textfile
 ```
 
-若要采集所有历史快照，则让 node_exporter 读取 `setup.prom` 所在目录。每轮都会增加时间序列，历史文件没有自动清理，需要明确保留期限。可将 `setup.prom` 设为 `/usr/local/anqu/textfile/时间process_monitor.prom`，使同一目录同时采集最新状态和快照；两种前缀互不冲突。不要把旧版本中没有 `run_id` 的历史 `.prom` 混入此目录。
+若要采集 `process_monitor.prom`，让 node_exporter 读取 `setup.prom` 所在目录，例如 `--collector.textfile.directory=/var/lib/node_exporter/textfile_collector`。也可将 `setup.prom` 设为 `/usr/local/anqu/textfile/process_monitor.prom`，使同一目录同时采集两种前缀的指标。`run_id` 仍随采集变化；固定文件名避免本地文件累积，稳定时间序列查询使用 `anqu_` 指标。升级不会自动删除已有的时间命名 `.prom` 文件；部署时可将这些旧快照移出采集目录，避免继续采集过期数据。未使用新监控模式的旧版配置仍保留原来的指标归档行为。
 
 常用最新状态指标：
 
@@ -325,6 +325,6 @@ sudo systemctl start anqu.service
 
 旧 `md5` / `existence` 配置可以继续运行；新模块使用独立后缀，不自动把旧 MD5 状态视为新规则的可信基线。停止原 timer 后迁移到常驻服务，避免重复调度。A 上保存私有 YAML，节点无需留存旧明文配置。
 
-验收时先运行 `go test ./...`、`go vet ./...`，再在目标 Linux 主机验证：首次基线、文件增删改、多 MD5 部分匹配、进程 OR 规则和实例变化、白名单、连续多次 SSH 登录、服务重启续读、北京时间零点切割、每轮新 `.prom` 与 node_exporter 采集。仓库的自动测试使用隔离目录和模拟日志；不能替代目标机的 journal 权限、`/proc` 可见性、systemd 和网络接收端验收。
+验收时先运行 `go test ./...`、`go vet ./...`，再在目标 Linux 主机验证：首次基线、文件增删改、多 MD5 部分匹配、进程 OR 规则和实例变化、白名单、连续多次 SSH 登录、服务重启续读、北京时间零点切割、固定 `.prom` 每轮更新与 node_exporter 采集。仓库的自动测试使用隔离目录和模拟日志；不能替代目标机的 journal 权限、`/proc` 可见性、systemd 和网络接收端验收。
 
 服务按周期采样，无法发现两次巡检之间发生又恢复的短暂文件/进程变化。日志数据源已丢弃的登录记录不能凭空恢复。历史报告、日志和指标不自动清理，由部署方按保留期限归档。当前源码文档不代表已有 `dist` 或旧发布压缩包已同步更新，交付前应重新构建。

@@ -22,5 +22,5 @@ server: []
 
 setup:
   logs: output/logs/时间anquan.log
-  prom: output/snapshots/时间process_monitor.prom
+  prom: output/snapshots/process_monitor.prom
   interval_seconds: 300

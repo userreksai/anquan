@@ -27,7 +27,7 @@ login:
   path: login.jsonl
 setup:
   logs: logs/时间anquan.log
-  prom: collector/时间process_monitor.prom
+  prom: collector/process_monitor.prom
   interval_seconds: 1
 `), dir)
 	if err != nil {
@@ -36,13 +36,14 @@ setup:
 	return c
 }
 
-func TestMonitoringRunLogsStateAndSnapshotSeries(t *testing.T) {
+func TestMonitoringRunOverwritesPromAndPreservesLogsAndState(t *testing.T) {
 	c := monitoringTestConfig(t)
 	var stdout bytes.Buffer
 	first, p1, err := RunWithWriter(c, &stdout)
 	if err != nil || !first.Success || !first.Files.BaselineCreated {
 		t.Fatalf("first=%+v err=%v", first, err)
 	}
+	firstProm := read(t, p1.Prom)
 	base := filepath.Dir(c.OutputDir)
 	put(t, filepath.Join(base, "watched", "app.conf"), "second")
 	put(t, filepath.Join(base, "watched", "new.conf"), "new")
@@ -51,12 +52,27 @@ func TestMonitoringRunLogsStateAndSnapshotSeries(t *testing.T) {
 	if err != nil || !second.Success || len(second.Files.Changes) != 2 || len(second.Login.Records) != 2 {
 		t.Fatalf("second=%+v err=%v", second, err)
 	}
-	third, _, err := RunWithWriter(c, &stdout)
+	secondProm := read(t, p2.Prom)
+	if secondProm == firstProm || !strings.Contains(secondProm, `kind="modified"`) || !strings.Contains(secondProm, `user="ops"`) {
+		t.Fatal("fixed metrics file was not refreshed with the new findings")
+	}
+	third, p3, err := RunWithWriter(c, &stdout)
 	if err != nil || len(third.Files.Changes) != 0 || len(third.Login.Records) != 0 {
 		t.Fatalf("rolling/dedup failed: %+v %v", third, err)
 	}
-	if p1.Prom == p2.Prom || p1.Log != p2.Log {
-		t.Fatal("each scan needs unique metrics and same daily log")
+	if p1.Prom != c.Setup.Prom || p1.Prom != p2.Prom || p2.Prom != p3.Prom || p1.Log != p2.Log {
+		t.Fatal("scans must reuse the configured metrics file and same daily log")
+	}
+	entries, err := os.ReadDir(filepath.Dir(p3.Prom))
+	if err != nil || len(entries) != 1 || entries[0].Name() != "process_monitor.prom" {
+		t.Fatalf("collector must contain only process_monitor.prom: %v, %v", entries, err)
+	}
+	thirdProm := read(t, p3.Prom)
+	if strings.Contains(thirdProm, first.StartedAt.Format(time.RFC3339Nano)) || strings.Contains(thirdProm, second.StartedAt.Format(time.RFC3339Nano)) || strings.Contains(thirdProm, `kind="modified"`) || strings.Contains(thirdProm, `user="ops"`) {
+		t.Fatal("fixed metrics file retained stale findings or appended earlier runs")
+	}
+	if !strings.Contains(thirdProm, third.StartedAt.Format(time.RFC3339Nano)) {
+		t.Fatal("fixed metrics file does not describe the latest run")
 	}
 	lines := strings.Split(strings.TrimSpace(stdout.String()), "\n")
 	events := map[string]int{}
@@ -81,15 +97,18 @@ func TestMonitoringRunLogsStateAndSnapshotSeries(t *testing.T) {
 		t.Fatal("daily logs lack MD5 evidence")
 	}
 	series := map[string]bool{}
-	for _, p := range []string{p1.Prom, p2.Prom} {
+	for _, p := range []string{p3.Prom, p3.Latest} {
 		for _, line := range strings.Split(read(t, p), "\n") {
 			if line == "" || strings.HasPrefix(line, "#") {
 				continue
 			}
 			i := strings.LastIndexByte(line, ' ')
 			key := line[:i]
-			if !strings.HasPrefix(line, "anqu_snapshot_") || !strings.Contains(key, "run_id=") || !strings.Contains(key, "host=") || series[key] {
-				t.Fatalf("duplicate or unscoped historical metric: %s", line)
+			if series[key] {
+				t.Fatalf("duplicate metric: %s", line)
+			}
+			if p == p3.Prom && (!strings.HasPrefix(line, "anqu_snapshot_") || !strings.Contains(key, "run_id=") || !strings.Contains(key, "host=")) {
+				t.Fatalf("monitoring metric schema changed: %s", line)
 			}
 			series[key] = true
 		}
@@ -108,14 +127,14 @@ func TestMonitoringPublishFailureDoesNotConsumeChangeOrLogin(t *testing.T) {
 	beforeFiles, beforeLogin := read(t, c.StateFile+".files"), read(t, c.StateFile+".logins")
 	blocked := filepath.Join(base, "blocked")
 	put(t, blocked, "not a directory")
-	c.Setup.Prom = filepath.Join(blocked, "时间process_monitor.prom")
+	c.Setup.Prom = filepath.Join(blocked, "process_monitor.prom")
 	if _, _, err := Run(c); err == nil {
 		t.Fatal("expected publish failure")
 	}
 	if read(t, c.StateFile+".files") != beforeFiles || read(t, c.StateFile+".logins") != beforeLogin {
 		t.Fatal("failed output consumed baseline/cursor")
 	}
-	c.Setup.Prom = filepath.Join(base, "collector", "时间process_monitor.prom")
+	c.Setup.Prom = filepath.Join(base, "collector", "process_monitor.prom")
 	r, _ := runOK(t, c)
 	if len(r.Files.Changes) != 1 || len(r.Login.Records) != 1 {
 		t.Fatalf("findings lost: %+v", r)
@@ -136,21 +155,67 @@ func TestBeijingDailyRotationAndTimestampTemplates(t *testing.T) {
 	if filepath.Base(logPath(c, before)) != "20261002anquan.log" || filepath.Base(logPath(c, after)) != "20261003anquan.log" {
 		t.Fatal("rotation did not occur at Beijing midnight")
 	}
-	for _, name := range []string{"process_monitor.prom", "{date}process_monitor.prom", "时间process_monitor.prom", "{time}process_monitor.prom"} {
-		if datedOutput(name, before, false) == datedOutput(name, before.Add(time.Nanosecond), false) {
-			t.Fatalf("nonunique snapshot: %s", name)
+	for _, name := range []string{"anquan.log", "{date}anquan.log", "时间anquan.log"} {
+		if dailyLogOutput(name, before) == dailyLogOutput(name, after) {
+			t.Fatalf("log did not rotate at midnight: %s", name)
 		}
-		if !outputNamePattern(name, false).MatchString(filepath.Base(datedOutput(name, before, false))) {
+		if !logOutputNamePattern(name).MatchString(filepath.Base(dailyLogOutput(name, before))) {
 			t.Fatalf("generated name not excluded: %s", name)
 		}
 	}
-	c.Setup = &SetupConfig{Logs: filepath.Join(dir, "external", "时间anquan.log"), Prom: filepath.Join(dir, "external", "时间process_monitor.prom")}
+	c.Setup = &SetupConfig{Logs: filepath.Join(dir, "external", "时间anquan.log"), Prom: filepath.Join(dir, "external", "process_monitor.prom")}
 	c.OutputDir = filepath.Join(dir, "reports")
 	if monitoringExcluded(c, filepath.Join(dir, "external", "other-anquan.log")) {
 		t.Fatal("unrelated suffix-match file was hidden from monitoring")
 	}
-	if !monitoringExcluded(c, datedOutput(c.Setup.Logs, before, true)) {
+	if !monitoringExcluded(c, dailyLogOutput(c.Setup.Logs, before)) {
 		t.Fatal("generated log was not excluded")
+	}
+	if !monitoringExcluded(c, c.Setup.Prom) || monitoringExcluded(c, filepath.Join(dir, "external", "other-process_monitor.prom")) {
+		t.Fatal("only the configured metrics file should be excluded")
+	}
+}
+
+func TestMonitoringPromConfigUsesFixedFilename(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{
+		{"", "/var/lib/node_exporter/textfile_collector/process_monitor.prom"},
+		{"collector/", "/base/collector/process_monitor.prom"},
+		{"collector", "/base/collector/process_monitor.prom"},
+		{"collector/process_monitor.prom", "/base/collector/process_monitor.prom"},
+		{"collector/时间process_monitor.prom", "/base/collector/process_monitor.prom"},
+		{"collector/{date}process_monitor.prom", "/base/collector/process_monitor.prom"},
+		{"collector/{time}process_monitor.prom", "/base/collector/process_monitor.prom"},
+		{"collector/custom.prom", "/base/collector/custom.prom"},
+	} {
+		t.Run(tc.input, func(t *testing.T) {
+			c := Config{Setup: &SetupConfig{Prom: tc.input}}
+			if err := normalizeMonitoring(&c, "/base", targetPathRules(false)); err != nil {
+				t.Fatal(err)
+			}
+			if c.Setup.Prom != tc.want || c.Setup.Logs != "/var/log/时间anquan.log" {
+				t.Fatalf("unexpected output config: %+v", c.Setup)
+			}
+		})
+	}
+}
+
+func TestMonitoringLegacyPromTemplateOverwritesFixedFile(t *testing.T) {
+	for _, tc := range []struct{ name, token string }{
+		{"chinese", "时间"}, {"date", "{date}"}, {"time", "{time}"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := monitoringTestConfig(t)
+			c.Setup.Prom = filepath.Join(filepath.Dir(c.Setup.Prom), tc.token+"process_monitor.prom")
+			if err := normalizeMonitoring(&c, filepath.Dir(c.OutputDir), nativePathRules()); err != nil {
+				t.Fatal(err)
+			}
+			_, first := runOK(t, c)
+			_, second := runOK(t, c)
+			entries, err := os.ReadDir(filepath.Dir(second.Prom))
+			if err != nil || first.Prom != second.Prom || len(entries) != 1 || entries[0].Name() != "process_monitor.prom" {
+				t.Fatalf("legacy template did not reuse fixed file: %v, %v", entries, err)
+			}
+		})
 	}
 }
 
@@ -234,7 +299,7 @@ ProcessMonitoring:
 server: ['172.22.0.100:55555']
 setup:
   logs: /var/log/时间anquan.log
-  prom: /var/lib/node_exporter/textfile_collector/时间process_monitor.prom
+  prom: /var/lib/node_exporter/textfile_collector/process_monitor.prom
 `
 	if err := ValidateEmbeddedYAML([]byte(valid), "linux"); err != nil {
 		t.Fatal(err)
