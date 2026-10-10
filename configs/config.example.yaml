@@ -77,9 +77,9 @@ server: []
 
 setup:
   logs: /var/log/时间anquan.log
-  prom: /var/lib/node_exporter/textfile_collector/时间process_monitor.prom
+  prom: /var/lib/node_exporter/textfile_collector/process_monitor.prom
   interval_seconds: 300     # -service 模式：首次立即执行，之后每 300 秒检查，不重叠执行
 # logs 的“时间”或 {date} 替换为北京时间 YYYYMMDD，零点换新文件。
-# prom 的“时间”或 {time} 替换为包含纳秒的采集时间，每轮独立文件。
-# 不写占位符时自动添加日期/时间前缀。占位符只允许出现在文件名。
+# prom 每轮原子覆盖同一个文件，不添加时间前缀；旧文件名中的“时间”/{date}/{time} 会被移除。
+# logs 不写占位符时自动添加日期前缀。占位符只允许出现在文件名。
 # 新模式不需 md5/existence 旧字段；旧配置格式仍可使用。

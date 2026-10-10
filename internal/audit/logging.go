@@ -14,7 +14,7 @@ func logPath(c Config, now time.Time) string {
 	if c.Setup != nil {
 		template = c.Setup.Logs
 	}
-	return datedOutput(template, now, true)
+	return dailyLogOutput(template, now)
 }
 
 // JSON Lines keeps paths/commands unambiguous and escapes embedded newlines.

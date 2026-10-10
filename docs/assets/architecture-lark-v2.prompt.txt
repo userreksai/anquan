@@ -1,0 +1,48 @@
+Generation mode: built-in image_gen
+
+Use case: infographic-diagram.
+Asset type: finished illustrated architecture poster for the existing Anquan security monitoring project, simplified Chinese. Create one brand-new high-resolution landscape image, approximately 16:9. All Chinese text must be large, crisp, spelled correctly, and easy to read when enlarged.
+
+Primary request: a colorful, vivid, professional illustrated architecture diagram reflecting the CURRENT implementation. The main story is Linux Agents sending telemetry to a Go Master, with a Web management interface and Lark-only notification configuration. Include the current external age-encrypted configuration workflow.
+
+Visual direction: premium 2.5D isometric editorial illustration, friendly rounded Linux server towers, a central command hub with a shield, a clearly recognizable SQLite database cylinder, a dashboard monitor with an administrator, and a cheerful chat robot/bell for Lark notifications. Vibrant cobalt blue for Agents, violet for Master, emerald green for Web, warm orange for Lark, and teal for the configuration workflow. Soft white/ivory background with extremely subtle tinted areas, soft shadows, generous whitespace, clean precise arrows. Lively and attractive, still a technically trustworthy diagram. No cartoon villains, hacker imagery, invented metrics, fake tiny UI text, corporate logos, floating unexplained hardware, or watermark. Not a generic all-rectangles flowchart. Keep text flat and perfectly readable, not perspective-distorted.
+
+TITLE across the top, exact: "Anquan 安全中心 · 系统架构"
+SUBTITLE exact: "节点采集 → 集中管理 → Lark 告警"
+Small date at top right: "2026.10"
+
+Composition: large readable main diagram occupying about the upper 75%, separate compact configuration ribbon at the bottom. The main diagram has three spacious regions: left Agent, center Master, right Web above and Lark below. Right Web and Lark must be visually separate endpoints, with NO arrow between them. Every connector has a clear arrowhead and a short nearby label. Arrows never cross labels or pass through hardware. Avoid densely packed text.
+
+LEFT, blue, section heading "01 节点检测":
+Illustrate a small cluster of two or three Linux servers with a shield and label "Linux Agent".
+Three compact icons and exact labels: "文件 MD5 / 增删", "进程变化 / 存活", "SSH 登录记录".
+A small local folder and document stack directly below, connected ONLY to Agent, label "本地留档", sublabel "JSON 报告 · JSONL 日志 · 指标".
+Small clock annotation next to Agent: "心跳 30 秒 · 默认巡检 5 分钟".
+A prominent rightward BLUE arrow leads from Agent into the central Master and ONLY in that direction. Label exact: "UDP 55555", secondary line "心跳 · 摘要 · 告警 · 登录".
+
+CENTER, violet, section heading "02 主控处理":
+Prominent attractive server/control hub with shield, exact label "Go Master 主控".
+Three short labels near the hub: "机器登记与在线状态", "事件去重与存储", "管理 API 与通知投递".
+Below the hub is a visible violet database cylinder connected to Master with a short two-headed arrow. Label "SQLite 数据库", sublabel "机器 · 事件 · 会话 · 通知队列".
+Master's UDP receiver, HTTP API, and notification worker belong to this single central component. Do not invent Redis, Kafka, MySQL, a message broker, Kubernetes, master replication, or a separate database server.
+
+RIGHT TOP, green, section heading "03 页面管理":
+A monitor displaying an attractive simplified dashboard with an administrator silhouette. Exact labels "Vue Web 前端" and "Nginx · TCP 10111".
+Small feature label: "机器管理 · 事件查询 · 通知配置".
+A clean two-headed GREEN arrow links this Web group and Master (queries and responses). Arrow label "同源 /api", secondary line "TCP 10110".
+Small refresh annotation "页面每 15 秒刷新".
+
+RIGHT BOTTOM, orange, section heading "04 告警通知":
+A welcoming orange chat robot with a bell and message bubble. Exact headline "Lark 群机器人", small badge "仅 Lark 格式".
+A clearly one-directional ORANGE arrow from Master toward this Lark robot. Arrow label "HTTPS Webhook", secondary label "仅 alert 自动通知".
+Beside the connection, compact label "持久队列 · 失败重试".
+Do not draw Feishu, WeCom, generic JSON choices, email, SMS, DingTalk, or other notification platforms.
+
+BOTTOM, a slim separate teal configuration ribbon, exact heading "配置更新流程":
+Four readable steps with small coordinated pictograms and left-to-right arrows, text EXACT:
+"页面编辑 YAML" → "Master age 加密" → "下载 config.age" → "人工部署到 Agent"
+Below this ribbon, one short clear sentence exact: "配置与程序同目录 · 更新无需重新编译 · 常驻服务重启生效"
+This is a manual configuration artifact workflow, not remote push or automatic deployment. Never draw a direct remote-command/control arrow from Master to Agent. Do not depict embedded YAML or AES-GCM as the configuration mechanism.
+
+Very bottom small but readable note: "UDP 尽力投递 · 已入库告警通知失败重试"
+Only render the quoted requested labels plus their numbered headings. No lengthy footnotes or paragraphs. Preserve excellent Simplified Chinese typography, consistent spacing, visually balanced isometric illustrations, logical arrow routing, correct ports and flow directions. Prioritize clarity over extra ornament.

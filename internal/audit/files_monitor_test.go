@@ -400,18 +400,20 @@ func TestFilesMonitoringInvalidBaselinePreserved(t *testing.T) {
 func TestFilesMonitoringExcludesOwnArtifacts(t *testing.T) {
 	c := filesTestConfig(t, FilesMonitoringConfig{Dir: []string{"."}})
 	base := filepath.Dir(c.OutputDir)
-	c.Setup = &SetupConfig{Logs: filepath.Join(base, "logs", "时间anquan.log"), Prom: filepath.Join(base, "prom", "时间process_monitor.prom")}
+	c.Setup = &SetupConfig{Logs: filepath.Join(base, "logs", "时间anquan.log"), Prom: filepath.Join(base, "prom", "process_monitor.prom")}
 	put(t, filepath.Join(base, "watched"), "data")
 	put(t, filepath.Join(c.OutputDir, "report.json"), "report")
 	put(t, c.StateFile, "legacy state")
 	put(t, c.StateFile+".processes", "process state")
-	put(t, datedOutput(c.Setup.Logs, time.Now(), true), "log")
-	put(t, datedOutput(c.Setup.Prom, time.Now(), false), "metrics")
+	put(t, dailyLogOutput(c.Setup.Logs, time.Now()), "log")
+	put(t, c.Setup.Prom, "metrics")
+	put(t, filepath.Join(filepath.Dir(c.Setup.Prom), ".anqu-publish.tmp"), "temporary metrics")
 	r, next := filesCollectOK(t, c)
 	if r.Scanned != 1 {
 		t.Fatalf("self artifacts were included: %+v", r)
 	}
 	filesCommit(t, c, next)
+	put(t, c.Setup.Prom, "updated metrics")
 	r, _ = filesCollectOK(t, c)
 	if r.Scanned != 1 || len(r.Changes) != 0 {
 		t.Fatalf("own baseline triggered a change: %+v", r)

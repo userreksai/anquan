@@ -46,7 +46,7 @@ func normalizeMonitoring(c *Config, base string, rules pathRules) error {
 		c.Setup.Logs = "/var/log/时间anquan.log"
 	}
 	if c.Setup.Prom == "" {
-		c.Setup.Prom = "/var/lib/node_exporter/textfile_collector/时间process_monitor.prom"
+		c.Setup.Prom = "/var/lib/node_exporter/textfile_collector/process_monitor.prom"
 	}
 	if c.Setup.IntervalSeconds == 0 {
 		c.Setup.IntervalSeconds = 300
@@ -63,7 +63,7 @@ func normalizeMonitoring(c *Config, base string, rules pathRules) error {
 			return fmt.Errorf("setup.%s cannot be blank", item.name)
 		}
 		if !strings.HasSuffix(*item.value, item.suffix) {
-			*item.value = strings.TrimRight(*item.value, "/\\") + "/时间" + map[string]string{"logs": "anquan.log", "prom": "process_monitor.prom"}[item.name]
+			*item.value = strings.TrimRight(*item.value, "/\\") + "/" + map[string]string{"logs": "时间anquan.log", "prom": "process_monitor.prom"}[item.name]
 		}
 		var err error
 		*item.value, err = rules.resolve(base, *item.value)
@@ -81,6 +81,10 @@ func normalizeMonitoring(c *Config, base string, rules pathRules) error {
 		remaining := strings.NewReplacer("{date}", "", "{time}", "").Replace(*item.value)
 		if strings.ContainsAny(remaining, "{}") {
 			return fmt.Errorf("setup.%s has an unknown timestamp token", item.name)
+		}
+		if item.name == "prom" {
+			// Accept old templates, but always publish to one fixed metrics file.
+			*item.value = strings.NewReplacer("时间", "", "{date}", "", "{time}", "").Replace(*item.value)
 		}
 	}
 	seen := map[string]bool{}
@@ -109,21 +113,14 @@ func normalizeMonitoring(c *Config, base string, rules pathRules) error {
 
 var beijing = time.FixedZone("Asia/Shanghai", 8*60*60)
 
-func datedOutput(template string, now time.Time, daily bool) string {
+func dailyLogOutput(template string, now time.Time) string {
 	now = now.In(beijing)
-	stamp := now.Format("20060102_150405.000000000-0700")
-	if daily {
-		stamp = now.Format("20060102")
-	}
+	stamp := now.Format("20060102")
 	name := filepath.Base(template)
 	if !strings.Contains(name, "时间") && !strings.Contains(name, "{date}") && !strings.Contains(name, "{time}") {
 		name = stamp + "_" + name
 	} else {
 		name = strings.NewReplacer("时间", stamp, "{time}", stamp, "{date}", now.Format("20060102")).Replace(name)
-		// Every task must create its own .prom, even a date-only template.
-		if !daily && !strings.Contains(template, "时间") && !strings.Contains(template, "{time}") {
-			name = stamp + "_" + name
-		}
 	}
 	return filepath.Join(filepath.Dir(template), name)
 }
@@ -139,7 +136,7 @@ func monitoringExcluded(c Config, p string) bool {
 		if filepath.Clean(filepath.Dir(p)) != filepath.Clean(filepath.Dir(template)) {
 			continue
 		}
-		if outputNamePattern(template, i == 0).MatchString(filepath.Base(p)) {
+		if i == 0 && logOutputNamePattern(template).MatchString(filepath.Base(p)) || i == 1 && filepath.Clean(p) == filepath.Clean(template) {
 			return true
 		}
 		if strings.HasPrefix(filepath.Base(p), ".anqu-") && strings.HasSuffix(p, ".tmp") {
@@ -151,20 +148,14 @@ func monitoringExcluded(c Config, p string) bool {
 
 // Only reserve generated filenames, not every file with a matching suffix.
 // In particular, /var/log/other-anquan.log must still be monitored.
-func outputNamePattern(template string, daily bool) *regexp.Regexp {
+func logOutputNamePattern(template string) *regexp.Regexp {
 	name := filepath.Base(template)
-	stamp := `[0-9]{8}_[0-9]{6}\.[0-9]{9}\+0800`
-	if daily {
-		stamp = `[0-9]{8}`
-	}
+	stamp := `[0-9]{8}`
 	pattern := regexp.QuoteMeta(name)
 	if !strings.Contains(name, "时间") && !strings.Contains(name, "{time}") && !strings.Contains(name, "{date}") {
 		pattern = stamp + "_" + pattern
 	} else {
 		pattern = strings.NewReplacer("时间", stamp, regexp.QuoteMeta("{time}"), stamp, regexp.QuoteMeta("{date}"), `[0-9]{8}`).Replace(pattern)
-		if !daily && !strings.Contains(name, "时间") && !strings.Contains(name, "{time}") {
-			pattern = stamp + "_" + pattern
-		}
 	}
 	return regexp.MustCompile("^" + pattern + "$")
 }
