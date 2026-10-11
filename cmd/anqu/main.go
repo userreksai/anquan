@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"anqu/internal/audit"
 	"anqu/internal/sealed"
@@ -20,7 +21,7 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, sealed.Config, os.Executable))
 }
 
-// Agent nodes read config.age beside the executable; no plaintext config API.
+// Agent nodes bootstrap from config.age and prefer validated master assignments.
 // Single checks keep local logs without terminal output; services also log to stdout.
 func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), executable func() (string, error)) int {
 	flags := flag.NewFlagSet("anqu", flag.ContinueOnError)
@@ -28,7 +29,7 @@ func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), e
 	showVersion := flags.Bool("version", false, "print program version")
 	service := flags.Bool("service", false, "run continuously using setup.interval_seconds")
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: anqu [-service] [-version]\nReads config.age beside the executable. Runs one silent check by default; -service checks immediately and periodically.")
+		fmt.Fprintln(stderr, "Usage: anqu [-service] [-version]\nBootstraps from config.age beside the executable; master assignments override audit settings. Runs one silent check by default; -service keeps an outbound configuration connection.")
 	}
 	if err := flags.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -66,15 +67,24 @@ func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), e
 	// Erase the decrypted source buffer as soon as parsing completes. Parsed Go
 	// values necessarily remain in process memory while the audit runs.
 	clear(data)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	delivery := audit.NewConfigDelivery(cfg, filepath.Dir(path), version)
+	if cached, err := delivery.CachedConfig(); err == nil {
+		cfg = cached
+	} else {
+		fmt.Fprintln(stderr, "master configuration cache unavailable; using local config.age")
+	}
 	if *service {
-		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer cancel()
-		if err := audit.Serve(ctx, cfg, stdout, version); err != nil {
+		if err := audit.ServeWithConfigDelivery(ctx, cfg, stdout, version, delivery); err != nil {
 			fmt.Fprintln(stderr, "service failed:", err)
 			return 1
 		}
 		return 0
 	}
+	syncCtx, cancelSync := context.WithTimeout(ctx, 3*time.Second)
+	cfg, _ = delivery.Sync(syncCtx)
+	cancelSync()
 	if err := audit.LifecycleLog(cfg, stdout, "agent_started", map[string]any{"version": version, "pid": os.Getpid(), "mode": "once"}); err != nil {
 		fmt.Fprintln(stderr, "cannot write startup log:", err)
 		return 1

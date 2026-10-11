@@ -12,8 +12,10 @@ import (
 )
 
 const ConfigFilename = "config.age"
+const MasterConfigFilename = "config.master.age"
 const MaxConfigBytes = 4 << 20
-const maxEncryptedBytes = 6 << 20
+const MaxEncryptedConfigBytes = 6 << 20
+const maxEncryptedBytes = MaxEncryptedConfigBytes
 
 // EncryptConfig uses the built-in deployment pair, including for optional build output.
 func EncryptConfig(data []byte) ([]byte, error) {
@@ -42,6 +44,23 @@ func LoadAge(path, secret string) ([]byte, error) {
 	ciphertext, err := io.ReadAll(io.LimitReader(f, maxEncryptedBytes+1))
 	if err != nil || len(ciphertext) > maxEncryptedBytes {
 		return nil, errors.New("cannot read config.age")
+	}
+	return decryptAge(ciphertext, identity)
+}
+
+// DecryptConfig authenticates a configuration delivered by the master with the
+// same deployment identity used to load config.age. No plaintext is persisted.
+func DecryptConfig(ciphertext []byte) ([]byte, error) {
+	identity, err := age.ParseX25519Identity(embeddedIdentity())
+	if err != nil {
+		return nil, errors.New("invalid built-in age identity")
+	}
+	return decryptAge(ciphertext, identity)
+}
+
+func decryptAge(ciphertext []byte, identity *age.X25519Identity) ([]byte, error) {
+	if len(ciphertext) > maxEncryptedBytes {
+		return nil, errors.New("encrypted configuration exceeds 6 MiB")
 	}
 	ciphertext = bytes.TrimSpace(bytes.TrimPrefix(ciphertext, []byte{0xef, 0xbb, 0xbf}))
 	reader, err := age.Decrypt(armor.NewReader(bytes.NewReader(ciphertext)), identity)

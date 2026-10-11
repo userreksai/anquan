@@ -67,6 +67,8 @@ login:
   # last_command: last
 
 # 默认只生成本地通知/日志/指标；主控 UDP 默认监听 55555。
+# 填写 server 后，Agent 还会主动连接同一主控 IP 的 TCP 55556 接收配置，无需开放 Agent 入站端口。
+# 本地 server/agent_ip 用于连接引导，不会被主控下发 YAML 覆盖；没有分配配置时使用本文件。
 server: []
 # 有接收端后，将上面一行替换为：
 # server:
