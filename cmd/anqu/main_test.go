@@ -2,14 +2,19 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"anqu/internal/audit"
+	"anqu/internal/sealed"
 )
 
 func TestAgentRejectsExternalConfigWithoutLoadingPayload(t *testing.T) {
@@ -131,5 +136,159 @@ func TestAgentEachInvocationUsesCurrentConfigAndFreshBaseline(t *testing.T) {
 		if err := json.Unmarshal(data, &report); err != nil || !report.Files.BaselineCreated || len(report.Files.Changes) != 0 {
 			t.Fatalf("invocation reused previous lifetime baseline: %+v %v", report.Files, err)
 		}
+	}
+}
+
+func TestAgentMissingLocalConfigRequiresMasterAndDoesNotScan(t *testing.T) {
+	t.Setenv("ANQUAN_MASTER", "")
+	t.Setenv("ANQUAN_AGENT_IP", "")
+	base := t.TempDir()
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"-service"}, &stdout, &stderr, func() ([]byte, error) { return nil, os.ErrNotExist }, func() (string, error) { return filepath.Join(base, "anqu"), nil })
+	if code != 1 || !strings.Contains(stderr.String(), "ANQUAN_MASTER") {
+		t.Fatalf("missing connection settings error is not actionable: %d %q", code, stderr.String())
+	}
+	if entries, _ := os.ReadDir(base); len(entries) != 0 {
+		t.Fatal("missing configuration created collection output")
+	}
+}
+
+func TestAgentCachedMasterConfigStartsWithoutLocalConfig(t *testing.T) {
+	for _, useEnv := range []bool{false, true} {
+		t.Run(map[bool]string{false: "flags", true: "environment"}[useEnv], func(t *testing.T) {
+			t.Setenv("ANQUAN_MASTER", "")
+			t.Setenv("ANQUAN_AGENT_IP", "")
+			base := t.TempDir()
+			ciphertext, err := sealed.EncryptConfig([]byte("output_dir: assigned\nmd5: {enabled: false}\nexistence: {enabled: false}\nlogin: {enabled: false}\nserver: []\nsetup: {logs: assigned/logs/agent.log, prom: assigned/agent.prom, interval_seconds: 1}\n"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(base, sealed.MasterConfigFilename), ciphertext, 0600); err != nil {
+				t.Fatal(err)
+			}
+			args := []string{"-master", "127.0.0.1", "-agent-ip", "192.0.2.21"}
+			if useEnv {
+				t.Setenv("ANQUAN_MASTER", "127.0.0.1")
+				t.Setenv("ANQUAN_AGENT_IP", "192.0.2.21")
+				args = nil
+			}
+			var stdout, stderr bytes.Buffer
+			code := run(args, &stdout, &stderr, func() ([]byte, error) { return nil, os.ErrNotExist }, func() (string, error) { return filepath.Join(base, "anqu"), nil })
+			if code != 0 || stdout.Len() != 0 || stderr.Len() != 0 {
+				t.Fatalf("cached master config could not run without config.age: %d %s %s", code, stdout.String(), stderr.String())
+			}
+			if reports, _ := filepath.Glob(filepath.Join(base, "assigned", "*.json")); len(reports) != 1 {
+				t.Fatal("cached master configuration was not collected")
+			}
+			if _, err := os.Stat(filepath.Join(base, sealed.ConfigFilename)); !os.IsNotExist(err) {
+				t.Fatal("remote-only invocation created a local configuration")
+			}
+		})
+	}
+}
+
+func TestNoArgumentCheckFetchesMasterConfigAndReportsSSHLogin(t *testing.T) {
+	base := t.TempDir()
+	tcp, err := net.Listen("tcp", "127.0.0.2:55556")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tcp.Close()
+	udp, err := net.ListenPacket("udp", "127.0.0.2:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer udp.Close()
+	t.Setenv("ANQUAN_MASTER", udp.LocalAddr().String())
+	t.Setenv("ANQUAN_AGENT_IP", "192.0.2.21")
+	loginPath := filepath.Join(base, "login.jsonl")
+	putLogin := func(id string) {
+		t.Helper()
+		data, _ := json.Marshal(map[string]any{"id": id, "user": "ops", "source_ip": "192.0.2.50", "terminal": "N/A", "login_time": time.Now().Format(time.RFC3339Nano)})
+		if err := os.WriteFile(loginPath, append(data, '\n'), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	putLogin("first-login")
+	ciphertext, err := sealed.EncryptConfig([]byte("output_dir: assigned\nmd5: {enabled: false}\nexistence: {enabled: false}\nlogin: {enabled: true, source: jsonl, path: login.jsonl}\nserver: []\nsetup: {logs: assigned/logs/agent.log, prom: assigned/agent.prom, interval_seconds: 1}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	served := make(chan error, 1)
+	go func() {
+		conn, err := tcp.Accept()
+		if err != nil {
+			served <- err
+			return
+		}
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+		decoder := json.NewDecoder(conn)
+		var hello map[string]any
+		if err := decoder.Decode(&hello); err != nil {
+			served <- err
+			return
+		}
+		if hello["type"] != "hello" || hello["ip"] != "192.0.2.21" {
+			served <- fmt.Errorf("incorrect hello: %+v", hello)
+			return
+		}
+		if err := json.NewEncoder(conn).Encode(map[string]any{"version": 1, "type": "config", "revision": fmt.Sprintf("%x", sha256.Sum256(ciphertext)), "ciphertext": string(ciphertext)}); err != nil {
+			served <- err
+			return
+		}
+		var ack map[string]any
+		err = decoder.Decode(&ack)
+		if err == nil && (ack["type"] != "ack" || ack["error"] != nil) {
+			err = fmt.Errorf("assignment rejected: %+v", ack)
+		}
+		served <- err
+	}()
+	runCheck := func(wantLogin string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		code := run(nil, &stdout, &stderr, func() ([]byte, error) { return nil, os.ErrNotExist }, func() (string, error) { return filepath.Join(base, "anqu"), nil })
+		if code != 0 || stdout.Len() != 0 || stderr.Len() != 0 {
+			t.Fatalf("no-argument check failed: %d %q %q", code, stdout.String(), stderr.String())
+		}
+		_ = udp.SetReadDeadline(time.Now().Add(time.Second))
+		for {
+			packet := make([]byte, 65536)
+			n, _, err := udp.ReadFrom(packet)
+			if err != nil {
+				t.Fatalf("no-argument check did not report SSH login: %v", err)
+			}
+			var event struct {
+				Type string `json:"type"`
+				IP   string `json:"ip"`
+				Data struct {
+					ID       string `json:"id"`
+					SourceIP string `json:"source_ip"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(packet[:n], &event); err != nil {
+				t.Fatal(err)
+			}
+			if event.Type == "ssh_login" {
+				if event.IP != "192.0.2.21" || event.Data.ID != wantLogin || event.Data.SourceIP != "192.0.2.50" {
+					t.Fatalf("wrong SSH login identity: %+v", event)
+				}
+				break
+			}
+		}
+	}
+	runCheck("first-login")
+	if err := <-served; err != nil {
+		t.Fatal(err)
+	}
+	_ = tcp.Close()
+	// A later interactive invocation needs neither flags nor environment nor a
+	// local config: it uses the saved connection plus encrypted master cache.
+	t.Setenv("ANQUAN_MASTER", "")
+	t.Setenv("ANQUAN_AGENT_IP", "")
+	putLogin("second-login")
+	runCheck("second-login")
+	if reports, _ := filepath.Glob(filepath.Join(base, "assigned", "*.json")); len(reports) != 2 {
+		t.Fatal("no-argument invocation did not perform exactly one scan")
 	}
 }

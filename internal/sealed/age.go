@@ -3,6 +3,7 @@ package sealed
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -34,7 +35,7 @@ func LoadAge(path, secret string) ([]byte, error) {
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, errors.New("cannot open config.age beside agent")
+		return nil, fmt.Errorf("cannot open config.age beside agent: %w", err)
 	}
 	defer f.Close()
 	info, err := f.Stat()
