@@ -19,11 +19,31 @@ func Serve(ctx context.Context, c Config, writer io.Writer, version string) erro
 	})
 }
 
+// ServeWithConfigDelivery keeps an outbound master connection while collecting.
+// Updates activate between scans; cancellation joins every independent worker.
+func ServeWithConfigDelivery(ctx context.Context, c Config, writer io.Writer, version string, delivery *ConfigDelivery) error {
+	if delivery == nil || len(delivery.endpoints) == 0 {
+		return Serve(ctx, c, writer, version)
+	}
+	unlock, err := lockState(delivery.cachePath() + ".service.lock")
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return serveRuntime(ctx, NewSession(c), writer, version, func(c Config, writer io.Writer) (Report, OutputPaths, error) {
+		return runWithWriter(c, writer, false)
+	}, HeartbeatInterval, delivery)
+}
+
 func serve(ctx context.Context, c Config, writer io.Writer, version string, scan func(Config, io.Writer) (Report, OutputPaths, error)) error {
 	return serveWithHeartbeatInterval(ctx, c, writer, version, scan, HeartbeatInterval)
 }
 
 func serveWithHeartbeatInterval(ctx context.Context, c Config, writer io.Writer, version string, scan func(Config, io.Writer) (Report, OutputPaths, error), heartbeatInterval time.Duration) error {
+	return serveRuntime(ctx, c, writer, version, scan, heartbeatInterval, nil)
+}
+
+func serveRuntime(ctx context.Context, c Config, writer io.Writer, version string, scan func(Config, io.Writer) (Report, OutputPaths, error), heartbeatInterval time.Duration, delivery *ConfigDelivery) error {
 	if c.Interval() <= 0 {
 		return fmt.Errorf("check interval must be positive")
 	}
@@ -34,7 +54,7 @@ func serveWithHeartbeatInterval(ctx context.Context, c Config, writer io.Writer,
 	if err != nil {
 		return err
 	}
-	defer unlock()
+	defer func() { unlock() }()
 	// Heartbeat errors and scan output may be written concurrently. os.Stdout
 	// already supports that, while embedded callers may supply a bytes.Buffer.
 	if writer != nil {
@@ -46,33 +66,99 @@ func serveWithHeartbeatInterval(ctx context.Context, c Config, writer io.Writer,
 	if ctx.Err() == nil {
 		heartbeatOnce(c, writer, version)
 	}
-	heartbeatCtx, cancelHeartbeat := context.WithCancel(ctx)
-	heartbeatDone := make(chan struct{})
-	go func() {
-		defer close(heartbeatDone)
-		heartbeatLoop(heartbeatCtx, c, writer, version, heartbeatInterval)
-	}()
-	defer func() { cancelHeartbeat(); <-heartbeatDone }()
-	historyDone := make(chan struct{})
-	go func() {
-		defer close(historyDone)
-		historyLoop(heartbeatCtx, c, writer)
-	}()
-	defer func() { cancelHeartbeat(); <-historyDone }()
+	startWorkers := func(cfg Config) func() {
+		workerCtx, cancel := context.WithCancel(ctx)
+		var workers sync.WaitGroup
+		workers.Add(2)
+		go func() {
+			defer workers.Done()
+			heartbeatLoop(workerCtx, cfg, writer, version, heartbeatInterval)
+		}()
+		go func() {
+			defer workers.Done()
+			historyLoop(workerCtx, cfg, writer)
+		}()
+		return func() { cancel(); workers.Wait() }
+	}
+	stopWorkers := startWorkers(c)
+	defer func() { stopWorkers() }()
+	var updates chan configUpdate
+	if delivery != nil {
+		updates = make(chan configUpdate)
+		deliveryCtx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() { defer close(done); delivery.run(deliveryCtx, updates) }()
+		defer func() { cancel(); <-done }()
+	}
 	ticker := time.NewTicker(c.Interval())
-	defer ticker.Stop()
+	defer func() { ticker.Stop() }()
+	scanPending := true
+	var startup <-chan time.Time
+	if delivery != nil && len(delivery.endpoints) > 0 {
+		// Allow a reachable master to select the initial audit configuration.
+		// ACKs still go through this running service's activation path.
+		timer := time.NewTimer(3 * time.Second)
+		defer timer.Stop()
+		startup = timer.C
+	}
 	for {
 		if ctx.Err() != nil {
 			return LifecycleLog(c, writer, "service_stopped", map[string]string{"reason": ctx.Err().Error()})
 		}
 		// RunWithWriter persists detailed failure logs. Errors never stop later checks.
-		if _, _, err := scan(c, writer); err != nil && writer != nil {
-			fmt.Fprintf(writer, "audit failed: %v\n", err)
+		if scanPending && startup == nil {
+			if _, _, err := scan(c, writer); err != nil && writer != nil {
+				fmt.Fprintf(writer, "audit failed: %v\n", err)
+			}
+			scanPending = false
 		}
 		select {
 		case <-ctx.Done():
 			return LifecycleLog(c, writer, "service_stopped", map[string]string{"reason": ctx.Err().Error()})
 		case <-ticker.C:
+			scanPending = true
+		case <-startup:
+			startup = nil
+		case update := <-updates:
+			next := update.config
+			var nextUnlock func()
+			applyErr := os.MkdirAll(filepath.Dir(next.StateFile), 0700)
+			if applyErr == nil && nativePathRules().key(next.StateFile) != nativePathRules().key(c.StateFile) {
+				nextUnlock, applyErr = lockState(next.StateFile + ".service.lock")
+			}
+			if applyErr == nil {
+				applyErr = LifecycleLog(next, writer, "configuration_validated", map[string]any{"interval_seconds": next.Interval().Seconds()})
+			}
+			if applyErr != nil {
+				if nextUnlock != nil {
+					nextUnlock()
+				}
+				update.result <- fmt.Errorf("configuration runtime setup failed")
+				continue
+			}
+			// Old workers must release history cursor locks before the next set
+			// starts. Cache failure restarts the original workers unchanged.
+			stopWorkers()
+			if err := update.commit(); err != nil {
+				if nextUnlock != nil {
+					nextUnlock()
+				}
+				stopWorkers = startWorkers(c)
+				update.result <- err
+				continue
+			}
+			if nextUnlock != nil {
+				unlock()
+				unlock = nextUnlock
+			}
+			c = NewSession(next)
+			startup = nil
+			stopWorkers = startWorkers(c)
+			ticker.Stop()
+			ticker = time.NewTicker(c.Interval())
+			scanPending = true
+			_ = LifecycleLog(c, writer, "configuration_applied", map[string]any{"interval_seconds": c.Interval().Seconds()})
+			update.result <- nil
 		}
 	}
 }
