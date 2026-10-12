@@ -16,7 +16,7 @@ import (
 	"anqu/internal/sealed"
 )
 
-const version = "0.6.1"
+const version = "0.6.2"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, sealed.Config, os.Executable))
@@ -29,10 +29,9 @@ func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), e
 	flags.SetOutput(stderr)
 	showVersion := flags.Bool("version", false, "print program version")
 	service := flags.Bool("service", false, "run continuously using setup.interval_seconds")
-	master := flags.String("master", os.Getenv("ANQUAN_MASTER"), "Master IP or comma-separated IPs (optional UDP port, default 55555); connects to TCP 55556; env ANQUAN_MASTER")
-	agentIP := flags.String("agent-ip", os.Getenv("ANQUAN_AGENT_IP"), "optional stable machine IP; env ANQUAN_AGENT_IP")
+	master := flags.String("master", os.Getenv("ANQUAN_MASTER"), "configuration Master IP or comma-separated IPs (optional TCP port, default 55556); env ANQUAN_MASTER; independent of YAML UDP server list")
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: anqu [-service] [-master IP] [-agent-ip IP] [-version]\nLocal config.age is optional: use -master / ANQUAN_MASTER once, then saved connection settings allow no-argument checks. Without an audit configuration, -service waits for platform assignment without scanning. Master configuration overrides local audit settings.")
+		fmt.Fprintln(stderr, "Usage: anqu [-service] [-master IP] [-version]\nUse -master / ANQUAN_MASTER once for TCP configuration delivery and automatic source-IP discovery. YAML server controls UDP reporting only. Local config.age is optional; saved connection settings allow no-argument checks. Without an audit configuration, -service waits for platform assignment without scanning.")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
@@ -74,7 +73,7 @@ func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), e
 	// Erase the decrypted source buffer as soon as parsing completes. Parsed Go
 	// values necessarily remain in process memory while the audit runs.
 	clear(data)
-	cfg, err = audit.BootstrapConfig(cfg, baseDir, *master, *agentIP)
+	cfg, err = audit.BootstrapConfig(cfg, baseDir, *master)
 	if err != nil {
 		fmt.Fprintln(stderr, "invalid bootstrap settings:", err)
 		return 1

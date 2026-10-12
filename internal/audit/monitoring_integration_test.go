@@ -228,7 +228,7 @@ func TestUDPNotificationEnvelopeAndNoMasterMode(t *testing.T) {
 	r := Report{Host: "test-host", StartedAt: time.Now(), Success: true, Alerts: []Alert{{Module: "files", Kind: "deleted", Target: "/tmp/example", Message: "removed"}}}
 	r.Login.Records = []LoginRecord{{User: "ops", LoginTime: r.StartedAt, SourceIP: "192.0.2.1", Terminal: "N/A"}}
 	results := notifyServers(Config{Server: []string{listener.LocalAddr().String()}}, r)
-	if len(results) != 1 || results[0].Error != "" || results[0].Sent != 3 || results[0].IP != "127.0.0.1" {
+	if len(results) != 1 || results[0].Error != "" || results[0].Sent != 3 || results[0].IP != "" {
 		t.Fatalf("results=%+v", results)
 	}
 	kinds := map[string]bool{}
@@ -249,7 +249,7 @@ func TestUDPNotificationEnvelopeAndNoMasterMode(t *testing.T) {
 		if err := json.Unmarshal(b[:n], &e); err != nil {
 			t.Fatal(err)
 		}
-		if e.Version != 1 || e.EventID == "" || ids[e.EventID] || e.Host != "test-host" || e.IP != "127.0.0.1" {
+		if e.Version != 1 || e.EventID == "" || ids[e.EventID] || e.Host != "test-host" || e.IP != "" {
 			t.Fatalf("bad envelope %s", b[:n])
 		}
 		kinds[e.Type] = true

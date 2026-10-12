@@ -68,16 +68,15 @@ login:
   # last_command: last
 
 # 默认只生成本地通知/日志/指标；主控 UDP 默认监听 55555。
-# 填写 server 后，Agent 还会主动连接同一主控 IP 的 TCP 55556 接收配置，无需开放 Agent 入站端口。
-# -master/ANQUAN_MASTER 和 -agent-ip/ANQUAN_AGENT_IP 优先于本地连接字段。
-# 连接引导不会被主控下发 YAML 覆盖；无分配且无本地文件时保持等待，不巡检。
+# TCP 配置地址独立由 -master/ANQUAN_MASTER 指定（默认 55556），不使用本列表。
+# 下发可修改本 UDP 列表；server: [] 只关闭数据上报，仍可接收配置。
+# 无分配且无本地文件时保持等待，不巡检；不需要 agent_ip。
 server: []
 # 有接收端后，将上面一行替换为：
 # server:
 #   - 172.22.0.100:55555
-# 上报机器 IP 默认使用连接主控时的本地出口地址。
-# NAT、多网卡或多主控场景可固定机器主键，各节点须保持唯一：
-# agent_ip: 172.22.0.101
+# 多台默认端口示例：server: [192.168.0.1,192.168.0.2]
+# Agent 与配置主控握手后自动取得实际来源 IP，跨公网 NAT 直连时为公网出口 IP。
 
 setup:
   logs: /var/log/时间anquan.log

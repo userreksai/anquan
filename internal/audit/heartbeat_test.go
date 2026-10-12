@@ -110,7 +110,7 @@ func TestOnceSendsStartupHeartbeatBeforeScanSummary(t *testing.T) {
 		t.Fatalf("scan failed: %+v %v", r, err)
 	}
 	first, second := readHeartbeatPacket(t, listener), readHeartbeatPacket(t, listener)
-	if first.Type != "heartbeat" || second.Type != "scan_summary" || first.IP != "127.0.0.1" {
+	if first.Type != "heartbeat" || second.Type != "scan_summary" || first.IP != "" {
 		t.Fatalf("startup did not precede scan report: %s %s", first.Type, second.Type)
 	}
 }

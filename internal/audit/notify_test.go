@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net"
 	"reflect"
-	"strings"
 	"testing"
 	"time"
 )
@@ -127,8 +126,8 @@ func TestUDPReportsExplicitMachineIPBehindNAT(t *testing.T) {
 func TestAgentIPValidation(t *testing.T) {
 	for _, ip := range []string{"0.0.0.0", "::", "224.0.0.1", "ff02::1", "example.com", "192.0.2.1:55555", "192.0.2.999"} {
 		data := "server: []\nagent_ip: '" + ip + "'\n"
-		if err := ValidateEmbeddedYAML([]byte(data), "linux"); err == nil || !strings.Contains(err.Error(), "agent_ip") {
-			t.Fatalf("invalid identity accepted: %q %v", ip, err)
+		if err := ValidateEmbeddedYAML([]byte(data), "linux"); err != nil {
+			t.Fatalf("legacy agent_ip should be ignored during migration: %v", err)
 		}
 	}
 	c := Config{AgentIP: "2001:0db8::1"}

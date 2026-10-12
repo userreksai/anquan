@@ -7,12 +7,11 @@ Agent 向主控 `55555/udp` 发送 UTF-8 JSON，每个数据报是一条完整�
 ```yaml
 server:
   - 172.22.0.100:55555
-agent_ip: 172.22.0.101
 setup:
   interval_seconds: 300
 ```
 
-`agent_ip` 可省略：Agent 会使用连接该 Master 的 UDP socket 本地出口 IP。显式配置支持 IPv4、IPv6，拒绝未指定地址和组播地址。NAT 后不同机器可使用各自唯一的内网 IP；多个主控出口不同、多网卡或需要固定机器主键时应明确配置。启动参数 `-agent-ip` 或环境变量 `ANQUAN_AGENT_IP` 优先于可选本地配置中的字段，常驻服务重启生效，无需重新构建 Agent。
+机器 IP 自动识别：配置 TCP Master 返回连接的实际来源地址，Agent 将其用于全部 UDP 上报；跨公网 NAT 直连时为公网出口 IP。无需配置 agent_ip，旧 YAML 的该字段以及 ANQUAN_AGENT_IP 被忽略。没有识别结果时 UDP ip 为空，接收 Master 使用数据报来源地址。多个节点共用同一出口公网 IP 时仍受现有 IP 主键约束，不能区分为不同机器。
 
 主控以 `ip` 为机器主键，`host` 仅作为主机名展示。接收旧 Agent 的报文缺少 `ip` 时，使用 UDP 数据报来源 IP。UDP 来源端口是临时端口，不能当作机器标识。机器 IP 变化会形成新的机器记录。该协议用于内网传输，无需认证或加密；主控开通对应 Agent 机器访问 `55555/udp` 的网络即可。
 
@@ -63,7 +62,7 @@ Master 收到首条有效心跳或检测事件时，按机器 IP 自动创建记
 
 ## TCP 配置下发（55556）
 
-Master 监听 `55556/tcp`，Agent 使用 `-master` / `ANQUAN_MASTER` 指定的主机地址，或可选本地 `config.age` 的 `server`，主动连接同一 IP 的 55556 端口，无需在节点监听端口。裸 IP 使用默认 UDP 55555，逗号分隔可配置多个主控，`IP:端口` 调整的是 UDP 上报端口。`-agent-ip` / `ANQUAN_AGENT_IP` 优先作为机器主键，省略时使用访问该 Master 的 UDP 出口 IP，与事件身份一致。多个 Master 按连接列表顺序选择可达配置主控。本地 `server: []` 且没有启动连接覆盖时关闭两种通信。
+Master 监听 `55556/tcp`。Agent 的配置主控地址来自 -master、ANQUAN_MASTER 或自动保存的连接信息，完全独立于 YAML 的 server。裸配置主控 IP 默认使用 TCP 55556，可用 IP:TCP端口调整。YAML 的 server 仅向全部地址发送 UDP 数据，裸 IP 默认使用 UDP 55555；server: [] 只关闭 UDP，不影响接收配置。
 
 v0.6.1 不要求本地 `config.age`：首次指定 Master 后自动保存 `agent.connection.json` 供后续无参数运行使用。无有效平台缓存或本地配置时，`-service` 只连接、注册并保持 TCP 心跳，等待下发，不开启巡检/登录/命令采集；Master 离线时持续重连。收到有效配置并完成运行环境检查和密文缓存后才启用采集并 ACK。主控明确取消分配时，无本地配置的 Agent 恢复等待，配置通道继续运行。
 
@@ -72,10 +71,18 @@ v0.6.1 不要求本地 `config.age`：首次指定 Master 后自动保存 `agent
 每帧是 UTF-8 JSON 加换行（NDJSON），最大 8 MiB，`version: 1`。JSON 字符串内的 age 密文换行使用 JSON 转义。第一帧：
 
 ```json
-{"version":1,"type":"hello","ip":"192.0.2.10","host":"node-a","agent_version":"0.6.0"}
+{"version":1,"type":"hello","discover_ip":true,"host":"node-a","agent_version":"0.6.2"}
 ```
 
-主控按机器登记并发送最新分配；没有分配时，`revision` 和 `ciphertext` 同时为空：
+主控按 TCP 实际来源 IP 登记机器，先回复身份，再发送最新分配：
+
+```json
+{"version":1,"type":"identity","ip":"49.7.214.217"}
+```
+
+Agent 验证并保存此地址，后续数据上报使用该 IP。旧 Agent 不发送 discover_ip 时，主控保留旧握手流程及上报 IP 语义，不主动发送新 identity 帧。识别地址是主控实际看到的连接来源，经代理或内网路径时可能是代理/内网地址，并非通用公网 IP 查询服务。
+
+没有分配时，revision 和 ciphertext 同时为空：
 
 ```json
 {"version":1,"type":"config","revision":"<密文完整字节的SHA-256十六进制>","ciphertext":"-----BEGIN AGE ENCRYPTED FILE-----\n..."}
@@ -91,7 +98,7 @@ Agent 先验证 revision、age 完整性和节点平台的 YAML 配置，再原�
 
 Agent 每 30 秒发送 `{"version":1,"type":"ping"}`，主控回复 `{"version":1,"type":"pong"}`。有效 hello 和 ping 更新机器活动时间；连接异常后 Agent 自动重连。页面 `connected` 单独表示配置 TCP 连接，机器 `online` 仍按最近活动时间及既有超时阈值计算。
 
-主控配置优先于本地 `config.age`，启动先使用有效缓存，再限时向主控同步。主控暂时不可达时沿用有效主控缓存，没有缓存则运行本地配置；主控明确发送空分配时删除缓存并使用本地配置。无参数单次模式只在启动时同步，实时推送需要 `-service`。本地配置必须保留作为连接引导，下发 YAML 的 `server` 和 `agent_ip` 不覆盖本地值。服务账号需要对程序目录的缓存写入权限。
+主控配置优先于可选本地 config.age，启动先使用有效缓存，再限时同步；无缓存且无本地配置时常驻等待。无参数仍执行一次巡检及 SSH 登录上报。下发 server 列表立即生效并替换 UDP 目标，TCP 配置地址及自动 IP 不由 YAML 控制。连接文件 version 2 保存 master 列表和 observed_ip；version 1 自动迁移为 TCP 55556 并忽略旧手工 agent_ip。服务账号需要程序目录的缓存写入权限。升级顺序为 Master、Agent，再更新 Web 示例。
 
 此通道沿用内网机器 IP 信任方式，没有单独的节点认证或 TLS；age 密文用于配置加密，不构成 Master 身份认证。仅允许可信 Agent 网络访问 55556/TCP。既有 UDP、HTTP 与 Webhook 的传输行为保持原有协议。
 
