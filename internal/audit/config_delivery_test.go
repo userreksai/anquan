@@ -24,12 +24,16 @@ func deliveryBootstrap(t *testing.T) (Config, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	cfg, err = BootstrapConfig(cfg, base, "127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	return cfg, base
 }
 
 func assignedFrame(t *testing.T, output string) configFrame {
 	t.Helper()
-	data := "output_dir: " + output + "\nmd5:\n  enabled: false\nlogin:\n  enabled: false\nexistence:\n  enabled: false\nserver: [192.0.2.99:22222]\nagent_ip: 192.0.2.99\nsetup:\n  logs: " + output + "/logs/agent.log\n  prom: " + output + "/agent.prom\n  interval_seconds: 2\n"
+	data := "output_dir: " + output + "\nmd5:\n  enabled: false\nlogin:\n  enabled: false\nexistence:\n  enabled: false\nserver: [127.0.0.1:22222]\nagent_ip: 192.0.2.99\nsetup:\n  logs: " + output + "/logs/agent.log\n  prom: " + output + "/agent.prom\n  interval_seconds: 2\n"
 	ciphertext, err := sealed.EncryptConfig([]byte(data))
 	if err != nil {
 		t.Fatal(err)
@@ -46,7 +50,7 @@ func TestAssignedConfigPersistsEncryptedAndKeepsBootstrapIdentity(t *testing.T) 
 	if err := d.accept(frame, commitAssignment); err != nil {
 		t.Fatal(err)
 	}
-	if d.current.OutputDir != filepath.Join(base, "remote") || d.current.AgentIP != cfg.AgentIP || len(d.current.Server) != 1 || d.current.Server[0] != cfg.Server[0] {
+	if d.current.OutputDir != filepath.Join(base, "remote") || d.current.reportedIP() != cfg.reportedIP() || len(d.current.Server) != 1 || d.current.Server[0] != "127.0.0.1:22222" || d.current.masters[0] != cfg.masters[0] {
 		t.Fatalf("assignment overwrote bootstrap identity: %+v", d.current)
 	}
 	stored, err := os.ReadFile(d.cachePath())
@@ -143,6 +147,7 @@ func (w *scanCancelWriter) Write(data []byte) (int, error) {
 func TestOfflineAgentDoesNotRequireWritableExecutableDirectory(t *testing.T) {
 	cfg, base := deliveryBootstrap(t)
 	cfg.Server = nil
+	cfg.masters = nil
 	programDir := filepath.Join(base, "program")
 	d := NewConfigDelivery(cfg, programDir, "test")
 	// A directory at the would-be lock filename makes any attempt to open it
@@ -184,7 +189,7 @@ func TestConfigDeliveryUsesBoundedFramesAndRepliesWithFailedACK(t *testing.T) {
 		go func() { done <- d.connection(ctx, agentConn, d.endpoints[0], true, commitAssignment) }()
 		decoder := json.NewDecoder(masterConn)
 		var hello configFrame
-		if err := decoder.Decode(&hello); err != nil || hello.Type != "hello" || hello.Version != 1 || hello.IP != cfg.AgentIP || hello.Host == "" || hello.AgentVersion != "test" {
+		if err := decoder.Decode(&hello); err != nil || hello.Type != "hello" || hello.Version != 1 || !hello.DiscoverIP || hello.IP != "" || hello.Host == "" || hello.AgentVersion != "test" {
 			t.Fatalf("invalid hello: %+v %v", hello, err)
 		}
 		if oversized {
@@ -297,7 +302,7 @@ func TestServiceConfigDeliveryReloadsWithoutRestartAndMaintainsPingDuringScan(t 
 	for _, want := range []string{"first", "second"} {
 		select {
 		case got := <-scans:
-			if filepath.Base(got.OutputDir) != want || got.AgentIP != cfg.AgentIP || got.Server[0] != cfg.Server[0] {
+			if filepath.Base(got.OutputDir) != want || got.reportedIP() != cfg.reportedIP() || got.Server[0] != "127.0.0.1:22222" || got.masters[0] != cfg.masters[0] {
 				t.Fatalf("scan did not use activated configuration %s: %+v", want, got)
 			}
 		case <-time.After(time.Second):
@@ -351,7 +356,7 @@ func TestServiceConfigDeliveryReloadsWithoutRestartAndMaintainsPingDuringScan(t 
 
 func TestRemoteOnlyServiceWaitsThenActivatesAndCanReturnToWaiting(t *testing.T) {
 	base := t.TempDir()
-	cfg, err := BootstrapConfig(Config{}, base, "127.0.0.1", "192.0.2.21")
+	cfg, err := BootstrapConfig(Config{}, base, "127.0.0.1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +398,7 @@ func TestRemoteOnlyServiceWaitsThenActivatesAndCanReturnToWaiting(t *testing.T) 
 	_ = masterConn.SetDeadline(time.Now().Add(10 * time.Second))
 	decoder, encoder := json.NewDecoder(masterConn), json.NewEncoder(masterConn)
 	var hello configFrame
-	if err := decoder.Decode(&hello); err != nil || hello.Type != "hello" || hello.IP != cfg.AgentIP {
+	if err := decoder.Decode(&hello); err != nil || hello.Type != "hello" || !hello.DiscoverIP || hello.IP != "" {
 		t.Fatalf("agent did not register without a local config: %+v %v", hello, err)
 	}
 	send := func(frame configFrame, wantError bool) {
@@ -434,7 +439,7 @@ func TestRemoteOnlyServiceWaitsThenActivatesAndCanReturnToWaiting(t *testing.T) 
 		t.Helper()
 		select {
 		case c := <-scans:
-			if c.WaitingForConfig() || c.OutputDir != filepath.Join(base, "assigned") || c.AgentIP != cfg.AgentIP || c.Server[0] != cfg.Server[0] {
+			if c.WaitingForConfig() || c.OutputDir != filepath.Join(base, "assigned") || c.reportedIP() != cfg.reportedIP() || c.Server[0] != "127.0.0.1:22222" || c.masters[0] != cfg.masters[0] {
 				t.Fatalf("assigned config did not replace waiting bootstrap: %+v", c)
 			}
 		case <-time.After(time.Second):

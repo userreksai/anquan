@@ -166,7 +166,7 @@ func TestAgentCachedMasterConfigStartsWithoutLocalConfig(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(base, sealed.MasterConfigFilename), ciphertext, 0600); err != nil {
 				t.Fatal(err)
 			}
-			args := []string{"-master", "127.0.0.1", "-agent-ip", "192.0.2.21"}
+			args := []string{"-master", "127.0.0.1"}
 			if useEnv {
 				t.Setenv("ANQUAN_MASTER", "127.0.0.1")
 				t.Setenv("ANQUAN_AGENT_IP", "192.0.2.21")
@@ -199,8 +199,8 @@ func TestNoArgumentCheckFetchesMasterConfigAndReportsSSHLogin(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer udp.Close()
-	t.Setenv("ANQUAN_MASTER", udp.LocalAddr().String())
-	t.Setenv("ANQUAN_AGENT_IP", "192.0.2.21")
+	t.Setenv("ANQUAN_MASTER", "127.0.0.2")
+	t.Setenv("ANQUAN_AGENT_IP", "10.0.0.28")
 	loginPath := filepath.Join(base, "login.jsonl")
 	putLogin := func(id string) {
 		t.Helper()
@@ -210,7 +210,7 @@ func TestNoArgumentCheckFetchesMasterConfigAndReportsSSHLogin(t *testing.T) {
 		}
 	}
 	putLogin("first-login")
-	ciphertext, err := sealed.EncryptConfig([]byte("output_dir: assigned\nmd5: {enabled: false}\nexistence: {enabled: false}\nlogin: {enabled: true, source: jsonl, path: login.jsonl}\nserver: []\nsetup: {logs: assigned/logs/agent.log, prom: assigned/agent.prom, interval_seconds: 1}\n"))
+	ciphertext, err := sealed.EncryptConfig([]byte("output_dir: assigned\nmd5: {enabled: false}\nexistence: {enabled: false}\nlogin: {enabled: true, source: jsonl, path: login.jsonl}\nserver: [" + udp.LocalAddr().String() + "]\nsetup: {logs: assigned/logs/agent.log, prom: assigned/agent.prom, interval_seconds: 1}\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,8 +229,12 @@ func TestNoArgumentCheckFetchesMasterConfigAndReportsSSHLogin(t *testing.T) {
 			served <- err
 			return
 		}
-		if hello["type"] != "hello" || hello["ip"] != "192.0.2.21" {
+		if hello["type"] != "hello" || hello["discover_ip"] != true || hello["ip"] != nil {
 			served <- fmt.Errorf("incorrect hello: %+v", hello)
+			return
+		}
+		if err := json.NewEncoder(conn).Encode(map[string]any{"version": 1, "type": "identity", "ip": "192.0.2.21"}); err != nil {
+			served <- err
 			return
 		}
 		if err := json.NewEncoder(conn).Encode(map[string]any{"version": 1, "type": "config", "revision": fmt.Sprintf("%x", sha256.Sum256(ciphertext)), "ciphertext": string(ciphertext)}); err != nil {

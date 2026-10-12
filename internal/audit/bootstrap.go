@@ -14,43 +14,49 @@ import (
 const ConnectionFilename = "agent.connection.json"
 
 type connectionSettings struct {
-	Version int      `json:"version"`
-	Server  []string `json:"server"`
-	AgentIP string   `json:"agent_ip,omitempty"`
+	Version    int      `json:"version"`
+	Master     []string `json:"master,omitempty"`
+	ObservedIP string   `json:"observed_ip,omitempty"`
+	Server     []string `json:"server,omitempty"`   // v1 migration only
+	AgentIP    string   `json:"agent_ip,omitempty"` // ignored v1 manual identity
 }
 
 // BootstrapConfig applies deployment connection settings to a local config.
 // With no local config, it creates a transport-only agent waiting for assignment.
-// Master accepts comma-separated IPs or IP:UDP-port; TCP always uses 55556.
-func BootstrapConfig(local Config, baseDir, master, agentIP string) (Config, error) {
+// Master accepts comma-separated IPs or IP:TCP-port, default 55556. YAML server
+// is a separate list of UDP report destinations and is never overridden here.
+func BootstrapConfig(local Config, baseDir, master string) (Config, error) {
 	c := local
+	stored, err := loadConnectionSettings(baseDir)
+	if err != nil && strings.TrimSpace(master) == "" {
+		return Config{}, err
+	}
 	if c.OutputDir == "" {
-		stored, err := loadConnectionSettings(baseDir)
-		if err != nil && strings.TrimSpace(master) == "" {
-			return Config{}, err
-		}
 		c = Config{
 			OutputDir: baseDir, StateFile: "state/md5.json", Timezone: "Asia/Shanghai",
 			Setup:            &SetupConfig{Logs: "logs/时间anquan.log", Prom: "textfile/process_monitor.prom", IntervalSeconds: 300},
-			Server:           stored.Server,
-			AgentIP:          stored.AgentIP,
 			waitingForConfig: true,
 		}
 	}
+	c.AgentIP = ""
+	c.identity = &agentIdentity{}
+	if ip := net.ParseIP(stored.ObservedIP); ip != nil && !ip.IsUnspecified() && !ip.IsMulticast() {
+		value := ip.String()
+		c.identity.ip.Store(&value)
+	}
+	c.masters = append([]string(nil), stored.Master...)
 	if strings.TrimSpace(master) != "" {
-		c.Server = nil
-		for _, address := range strings.Split(master, ",") {
-			address = strings.TrimSpace(address)
-			if ip := net.ParseIP(address); ip != nil {
-				address = net.JoinHostPort(ip.String(), "55555")
-			}
-			c.Server = append(c.Server, address)
+		c.masters = strings.Split(master, ",")
+	}
+	seen := map[string]bool{}
+	for i, address := range c.masters {
+		address, err := normalizeEndpoint(address, ConfigDeliveryPort)
+		if err != nil || seen[address] {
+			return Config{}, fmt.Errorf("invalid or duplicate configuration Master address")
 		}
+		c.masters[i], seen[address] = address, true
 	}
-	if strings.TrimSpace(agentIP) != "" {
-		c.AgentIP = strings.TrimSpace(agentIP)
-	}
-	if c.waitingForConfig && len(c.Server) == 0 {
+	if c.waitingForConfig && len(c.masters) == 0 {
 		return Config{}, fmt.Errorf("no local configuration; specify -master or ANQUAN_MASTER to wait for platform configuration")
 	}
 	return normalizeConfig(c, baseDir, nativePathRules())
@@ -74,21 +80,37 @@ func loadConnectionSettings(baseDir string) (connectionSettings, error) {
 	decoder := json.NewDecoder(io.LimitReader(f, 64*1024+1))
 	decoder.DisallowUnknownFields()
 	var settings connectionSettings
-	if err := decoder.Decode(&settings); err != nil || settings.Version != 1 {
+	if err := decoder.Decode(&settings); err != nil || (settings.Version != 1 && settings.Version != 2) {
 		return connectionSettings{}, errors.New("invalid saved Master connection settings; specify -master or ANQUAN_MASTER")
 	}
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return connectionSettings{}, errors.New("invalid saved Master connection settings; specify -master or ANQUAN_MASTER")
 	}
+	if settings.Version == 1 {
+		settings.Master = nil
+		for _, endpoint := range settings.Server {
+			host, _, err := net.SplitHostPort(endpoint)
+			if err != nil {
+				return connectionSettings{}, errors.New("invalid saved Master connection settings; specify -master or ANQUAN_MASTER")
+			}
+			settings.Master = append(settings.Master, net.JoinHostPort(host, ConfigDeliveryPort))
+		}
+		// A manually supplied v1 IP must not masquerade as discovered identity.
+		settings.ObservedIP = ""
+	}
 	return settings, nil
 }
 
 func (d *ConfigDelivery) persistConnectionSettings() error {
-	if !d.bootstrap.waitingForConfig {
+	if len(d.bootstrap.masters) == 0 {
 		return nil
 	}
-	data, err := json.Marshal(connectionSettings{Version: 1, Server: d.bootstrap.Server, AgentIP: d.bootstrap.AgentIP})
+	return d.persistObservedConnection(d.bootstrap.reportedIP())
+}
+
+func (d *ConfigDelivery) persistObservedConnection(ip string) error {
+	data, err := json.Marshal(connectionSettings{Version: 2, Master: d.bootstrap.masters, ObservedIP: ip})
 	if err != nil || len(data) > 64*1024 {
 		return errors.New("Master connection settings exceed 64 KiB")
 	}

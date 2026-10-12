@@ -88,7 +88,13 @@ func normalizeMonitoring(c *Config, base string, rules pathRules) error {
 		}
 	}
 	seen := map[string]bool{}
-	for _, endpoint := range c.Server {
+	for i, endpoint := range c.Server {
+		var err error
+		endpoint, err = normalizeEndpoint(endpoint, "55555")
+		if err != nil {
+			return fmt.Errorf("server: %w", err)
+		}
+		c.Server[i] = endpoint
 		host, port, err := net.SplitHostPort(endpoint)
 		if err != nil || net.ParseIP(host) == nil {
 			return fmt.Errorf("server entry must be an IP:port (IPv6 in brackets): %q", endpoint)

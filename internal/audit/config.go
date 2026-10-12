@@ -34,6 +34,8 @@ type Config struct {
 	location          *time.Location
 	session           *baselineSession
 	waitingForConfig  bool
+	masters           []string
+	identity          *agentIdentity
 }
 
 // WaitingForConfig is true only for an agent with no local or assigned audit
@@ -99,6 +101,8 @@ func decodeYAML(data []byte) (Config, error) {
 	if err := d.Decode(&c); err != nil {
 		return c, fmt.Errorf("YAML configuration: %w", err)
 	}
+	// Retain decoding of old files, but configuration cannot choose machine IP.
+	c.AgentIP = ""
 	var extra any
 	if err := d.Decode(&extra); err != io.EOF {
 		return c, fmt.Errorf("expected exactly one YAML document")

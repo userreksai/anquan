@@ -27,12 +27,13 @@ type configFrame struct {
 	IP           string `json:"ip,omitempty"`
 	Host         string `json:"host,omitempty"`
 	AgentVersion string `json:"agent_version,omitempty"`
+	DiscoverIP   bool   `json:"discover_ip,omitempty"`
 	Revision     string `json:"revision,omitempty"`
 	Ciphertext   string `json:"ciphertext,omitempty"`
 	Error        string `json:"error,omitempty"`
 }
 
-type controlEndpoint struct{ tcp, udp string }
+type controlEndpoint struct{ tcp string }
 
 // configUpdate is acknowledged only after the service has acquired any new
 // state lock, committed the encrypted cache and activated the new workers.
@@ -42,8 +43,8 @@ type configUpdate struct {
 	result chan error
 }
 
-// ConfigDelivery keeps transport and machine identity anchored to deployment
-// settings (-master / environment) or optional config.age.
+// ConfigDelivery uses deployment TCP addresses independently of YAML's UDP
+// destinations, and discovers machine identity from the connected master.
 // The first reachable master owns the connection until it disconnects.
 type ConfigDelivery struct {
 	bootstrap Config
@@ -58,18 +59,16 @@ type ConfigDelivery struct {
 }
 
 func NewConfigDelivery(bootstrap Config, baseDir, version string) *ConfigDelivery {
+	if bootstrap.identity == nil {
+		bootstrap.identity = &agentIdentity{}
+	}
 	d := &ConfigDelivery{bootstrap: bootstrap, current: bootstrap, baseDir: baseDir, version: version, retry: 5 * time.Second, ping: 30 * time.Second}
 	dialer := net.Dialer{Timeout: 2 * time.Second, KeepAlive: 30 * time.Second}
 	d.dial = dialer.DialContext
 	seen := make(map[string]bool)
-	for _, endpoint := range bootstrap.Server {
-		host, _, err := net.SplitHostPort(endpoint)
-		if err != nil {
-			continue
-		}
-		address := net.JoinHostPort(host, ConfigDeliveryPort)
+	for _, address := range bootstrap.masters {
 		if !seen[address] {
-			d.endpoints = append(d.endpoints, controlEndpoint{address, endpoint})
+			d.endpoints = append(d.endpoints, controlEndpoint{address})
 			seen[address] = true
 		}
 	}
@@ -122,9 +121,9 @@ func (d *ConfigDelivery) parseAssigned(ciphertext []byte) (Config, error) {
 	if err != nil {
 		return Config{}, errors.New("master configuration contains invalid YAML")
 	}
-	// Shared templates cannot alter transport destinations or node identity.
-	cfg.Server = append([]string(nil), d.bootstrap.Server...)
-	cfg.AgentIP = d.bootstrap.AgentIP
+	// The UDP server list belongs to the assigned config. TCP configuration
+	// destinations and observed identity belong to deployment/runtime state.
+	cfg.masters, cfg.identity = d.bootstrap.masters, d.bootstrap.identity
 	cfg, err = normalizeConfig(cfg, d.baseDir, nativePathRules())
 	if err != nil {
 		return Config{}, errors.New("master configuration validation failed")
@@ -204,18 +203,20 @@ func (d *ConfigDelivery) run(ctx context.Context, updates chan<- configUpdate) {
 	}
 }
 
-func (d *ConfigDelivery) helloIP(endpoint controlEndpoint) string {
-	if d.bootstrap.AgentIP != "" {
-		return d.bootstrap.AgentIP
+func (d *ConfigDelivery) observeIP(address string) error {
+	ip := net.ParseIP(address)
+	if ip == nil || ip.IsUnspecified() || ip.IsMulticast() {
+		return errors.New("master returned an invalid observed agent IP")
 	}
-	// Use the existing UDP route, which can differ from a TCP route on machines
-	// with policy routing. This matches sendUDP's machine primary key exactly.
-	conn, err := net.Dial("udp", endpoint.udp)
-	if err != nil {
-		return ""
+	value := ip.String()
+	if err := d.persistObservedConnection(value); err != nil {
+		return err
 	}
-	defer conn.Close()
-	return conn.LocalAddr().(*net.UDPAddr).IP.String()
+	if d.bootstrap.identity == nil {
+		return errors.New("agent identity was not initialized")
+	}
+	d.bootstrap.identity.ip.Store(&value)
+	return nil
 }
 
 func (d *ConfigDelivery) connection(ctx context.Context, conn net.Conn, endpoint controlEndpoint, once bool, apply func(Config, func() error) error) error {
@@ -240,7 +241,7 @@ func (d *ConfigDelivery) connection(ctx context.Context, conn net.Conn, endpoint
 	if err != nil {
 		return errors.New("cannot determine agent hostname")
 	}
-	if err := write(configFrame{Version: 1, Type: "hello", IP: d.helloIP(endpoint), Host: host, AgentVersion: d.version}); err != nil {
+	if err := write(configFrame{Version: 1, Type: "hello", DiscoverIP: true, Host: host, AgentVersion: d.version}); err != nil {
 		return err
 	}
 	pingDone := make(chan struct{})
@@ -281,6 +282,10 @@ func (d *ConfigDelivery) connection(ctx context.Context, conn net.Conn, endpoint
 			return errors.New("invalid master configuration frame")
 		}
 		switch frame.Type {
+		case "identity":
+			if err := d.observeIP(frame.IP); err != nil {
+				return err
+			}
 		case "pong":
 			continue
 		case "config":

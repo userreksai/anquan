@@ -1,4 +1,4 @@
-# Anqu 安全检测 Agent（v0.6.1）
+# Anqu 安全检测 Agent（v0.6.2）
 
 Anqu 在 Linux 节点持续检查文件 MD5、文件增删和进程变化，并逐条记录成功的 SSH 登录。服务启动时记录当前时间，每轮输出当前主机的完整检测结果、告警、JSON 报告，并更新固定路径的 Prometheus 文件。运行日志按北京时间零点切换文件。
 
@@ -20,11 +20,13 @@ Agent 支持平台下发配置和可选的外置 age 加密配置：构建时只
 
 ```sh
 ./dist/anquan -service -master 8.217.222.30
-# 也可使用环境变量；可选 ANQUAN_AGENT_IP 固定每台机器的唯一标识。
+# 也可使用环境变量；不需要 ANQUAN_AGENT_IP。
 ANQUAN_MASTER=8.217.222.30 ./dist/anquan -service
 ```
 
-Agent 自动向同一主控 IP 的 **55556/TCP** 发起连接，登记机器并持续等待下发，Agent 不监听端口。首次没有配置或 Master 离线时，进程保持运行并重试连接，巡检、登录及命令采集暂停；收到有效配置后自动开始采集。Master 开放 55556/TCP，原有 55555/UDP 继续接收事件。`-master` / `ANQUAN_MASTER` 接受逗号分隔的 IP 列表，IP 后可指定 UDP 端口，省略时为 55555；TCP 配置端口固定 55556。`-agent-ip` / `ANQUAN_AGENT_IP` 可固定机器主键，省略时使用连接主控的出口 IP。
+Agent 使用 `-master` / `ANQUAN_MASTER` 独立指定配置主控，裸 IP 默认连接 **55556/TCP**，也支持 IP:TCP端口和逗号分隔的配置主控列表。此地址不取自 YAML 的 `server`，也不覆盖 UDP 上报列表。Agent 不监听端口；首次没有配置或 Master 离线时保持运行并重连，收到有效配置后自动开始采集。
+
+Agent 在 TCP 握手中请求 IP 识别，Master 返回实际连接来源地址；跨公网 NAT 直连时就是主控看到的公网出口 IP。Agent 将此 IP 用于向所有 UDP 主控上报，并自动保存供重启和无参数运行使用。无需填写 `agent_ip` 或 `ANQUAN_AGENT_IP`；旧 YAML 中的 agent_ip 与旧连接文件中的手工 IP 被忽略。未取得识别结果时 UDP 的 ip 字段为空，由接收 Master 根据实际数据报来源登记，避免把内网 socket 地址误当公网 IP。Master 和 Agent 必须配套升级，TCP 仅传配置及握手/心跳信息，检测数据继续使用 UDP。
 
 systemd 可在服务的 `[Service]` 中设置 `Environment=ANQUAN_MASTER=8.217.222.30`，原 `ExecStart=... -service` 无需修改。仓库提供的 `deploy/anqu.service` 还支持从可选 `/etc/anqu-agent.env` 读取环境变量。
 
@@ -34,7 +36,7 @@ systemd 可在服务的 `[Service]` 中设置 `Environment=ANQUAN_MASTER=8.217.2
 
 主控下发的配置以 `config.master.age` 原子保存在 Agent 可执行文件旁，优先于本地 `config.age`；重启或主控暂时不可达时仍使用有效缓存，无需补建本地配置。主控明确返回未给本机分配配置时，Agent 清除主控缓存并恢复本地配置；没有本地配置则继续等待，不执行巡检。常驻模式在当前扫描完成后切换并立即按新配置扫描；无参数单次模式只在启动时限时同步，仍没有配置时返回 1。切换配置会重新建立文件/进程基线，登录和命令游标沿用对应状态路径。
 
-本地 `config.age` 为可选的巡检回退配置，也可在其中填写 `server` 和 `agent_ip` 提供连接引导。启动参数优先于对应环境变量，环境变量优先于本地连接字段；无本地文件时使用自动保存的连接信息。下发 YAML 不改变主控地址及机器身份。多个 Master 按连接列表顺序选择可达配置主控，事件仍按原逻辑向全部地址上报。首次既无本地配置/保存的连接地址又未指定 Master 时，会提示设置 `-master` 或 `ANQUAN_MASTER`。可执行目录必须允许服务账号写入 `config.master.age` 和连接信息。TCP 配置通道沿用内网机器身份信任方式，仅开放给可信 Agent 网络。协议见 [Agent / Master 协议](docs/agent-master-protocol.md)。
+本地 `config.age` 为可选巡检回退配置。配置主控的优先级为启动参数、ANQUAN_MASTER、自动保存的连接地址；它与 YAML 的 UDP `server` 列表完全独立。下发 YAML 的 server 列表可立即切换 UDP 目标，不影响配置 TCP 连接或自动识别的机器 IP。多个配置主控按连接列表顺序选择，数据向 server 中的全部地址上报；server: [] 仅关闭 UDP。首次无保存地址且没有设置配置主控时，无本地配置的 Agent 提示设置 ANQUAN_MASTER；仅本地巡检仍可独立运行。程序目录须允许写入配置缓存和连接信息。协议见 [Agent / Master 协议](docs/agent-master-protocol.md)。
 
 构建机需要 Go 1.25 或更新版本。首次构建会下载 age 和 YAML 依赖。
 
@@ -270,13 +272,13 @@ Agent 不修改、清空或轮转源日志，日志会按原脚本持续增大�
 
 ## UDP 主控接口
 
-`server: []` 不联网，所有检测和通知结果保存在本地。填写 IP:端口后，Agent 启动时在首轮采集前立即向每个地址发送 `heartbeat`，`-service` 常驻运行期间每 30 秒独立上报心跳，耗时扫描不阻塞心跳。每轮采集完成后发送一个 `scan_summary`，以及逐条 `alert`、`ssh_login` JSON 数据报：
+`server: []` 不发送 UDP 数据，仍保持已配置的 TCP 配置连接。`server: [192.168.0.1,192.168.0.2]` 是正确的多主控格式，裸 IP 使用 UDP 55555；也支持 `IP:端口` 和 `[IPv6]:端口`。Agent 向全部列表地址发送心跳、扫描摘要、告警、SSH 登录及启用的命令记录，常驻时每 30 秒独立发送 UDP 心跳。
 
 ```json
 {"version":1,"event_id":"唯一事件摘要","ip":"172.22.0.101","host":"node-a","time":"2026-10-02T10:00:00+08:00","type":"alert","data":{"module":"files","kind":"missing","target":"/etc/ssh/sshrc","message":"configured file or directory does not exist"}}
 ```
 
-主控 UDP 默认端口为 `55555`，使用内网通信，无需认证或加密，开通相应 Agent 到主控的网络即可。`ip` 默认取连接当前主控时的本地出口地址；可增加顶层 `agent_ip: 172.22.0.101` 固定机器主键，适用于 NAT、多网卡或多个主控路径不同的情况。不同机器必须配置不同的 IP。主控收到首次上报即自动创建机器；连续超过 90 秒没有有效上报时显示“异常离线”，再次上报立即恢复“在线”。心跳只更新机器状态，不进入事件历史，不触发 webhook。旧 Agent 没有独立心跳时，仍按扫描周期的三倍（最低 120 秒）判断离线，默认 300 秒扫描对应 900 秒。
+主控 UDP 默认端口为 `55555`，开通相应 Agent 到各接收主控的网络即可。ip 使用 TCP 配置主控返回的实际来源地址，所有 UDP 目标使用同一个识别结果；SSH 登录的 source_ip 仍是登录来源，与机器身份分开。机器以 IP 为主键，主控收到首次上报即自动创建；心跳只更新在线状态，不进入事件历史。当前心跳周期为 30 秒，连续超过 90 秒没有有效活动显示异常离线。
 
 每轮 `scan_summary` 包含巡检间隔 `interval_seconds`，与心跳的 30 秒周期分别保存。文件告警的 `target` 是文件路径或搜索规则，`before` / `after` 保留前后 MD5；成功登录事件保留来源 `source_ip`、实际 `login_time` 和稳定 `id`，外层 `time` 同样使用登录发生时间。
 
