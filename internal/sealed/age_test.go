@@ -2,6 +2,7 @@ package sealed
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -44,8 +45,8 @@ func TestExternalAgeConfiguration(t *testing.T) {
 			t.Fatal("invalid input returned plaintext")
 		}
 	}
-	if _, err := LoadAge(filepath.Join(t.TempDir(), ConfigFilename), id.String()); err == nil {
-		t.Fatal("missing file accepted")
+	if _, err := LoadAge(filepath.Join(t.TempDir(), ConfigFilename), id.String()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing file is not distinguishable from damaged configuration: %v", err)
 	}
 	if _, err := LoadAge(t.TempDir(), id.String()); err == nil {
 		t.Fatal("directory accepted")

@@ -348,3 +348,113 @@ func TestServiceConfigDeliveryReloadsWithoutRestartAndMaintainsPingDuringScan(t 
 	}
 	done <- nil // Let the cleanup verify the already-completed service.
 }
+
+func TestRemoteOnlyServiceWaitsThenActivatesAndCanReturnToWaiting(t *testing.T) {
+	base := t.TempDir()
+	cfg, err := BootstrapConfig(Config{}, base, "127.0.0.1", "192.0.2.21")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Setup.IntervalSeconds = 1
+	d := NewConfigDelivery(cfg, base, "remote-only-test")
+	d.ping, d.retry = time.Hour, time.Hour
+	agentConn, masterConn := net.Pipe()
+	defer masterConn.Close()
+	var once sync.Once
+	d.dial = func(context.Context, string, string) (net.Conn, error) {
+		var conn net.Conn
+		once.Do(func() { conn = agentConn })
+		if conn == nil {
+			return nil, errors.New("offline")
+		}
+		return conn, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	scans := make(chan Config, 10)
+	done := make(chan error, 1)
+	var output bytes.Buffer
+	go func() {
+		done <- serveRuntime(ctx, cfg, &output, "remote-only-test", func(c Config, _ io.Writer) (Report, OutputPaths, error) {
+			scans <- c
+			return Report{Success: true}, OutputPaths{}, nil
+		}, time.Hour, d)
+	}()
+	defer func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Error(err)
+			}
+		case <-time.After(3 * time.Second):
+			t.Error("waiting service did not stop cleanly")
+		}
+	}()
+	_ = masterConn.SetDeadline(time.Now().Add(10 * time.Second))
+	decoder, encoder := json.NewDecoder(masterConn), json.NewEncoder(masterConn)
+	var hello configFrame
+	if err := decoder.Decode(&hello); err != nil || hello.Type != "hello" || hello.IP != cfg.AgentIP {
+		t.Fatalf("agent did not register without a local config: %+v %v", hello, err)
+	}
+	send := func(frame configFrame, wantError bool) {
+		t.Helper()
+		if err := encoder.Encode(frame); err != nil {
+			t.Fatal(err)
+		}
+		var ack configFrame
+		if err := decoder.Decode(&ack); err != nil || ack.Type != "ack" || ack.Revision != frame.Revision || (ack.Error != "") != wantError {
+			t.Fatalf("unexpected assignment ACK: %+v %v", ack, err)
+		}
+	}
+	assertPaused := func(delay time.Duration) {
+		t.Helper()
+		select {
+		case c := <-scans:
+			t.Fatalf("unconfigured agent scanned: %+v", c)
+		case <-time.After(delay):
+		}
+	}
+	send(configFrame{Version: 1, Type: "config"}, false)
+	// Waiting out the old three-second startup fallback proves that no default
+	// scan, worker output or state lock is created while assignment is absent.
+	assertPaused(3200 * time.Millisecond)
+	for _, name := range []string{"state", "logs", "textfile"} {
+		if _, err := os.Stat(filepath.Join(base, name)); !os.IsNotExist(err) {
+			t.Fatalf("waiting service created %s", name)
+		}
+	}
+	bad, err := sealed.EncryptConfig([]byte("unknown_field: rejected\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	send(configFrame{Version: 1, Type: "config", Revision: configRevision(bad), Ciphertext: string(bad)}, true)
+	assertPaused(20 * time.Millisecond)
+	assigned := assignedFrame(t, "assigned")
+	readScan := func() {
+		t.Helper()
+		select {
+		case c := <-scans:
+			if c.WaitingForConfig() || c.OutputDir != filepath.Join(base, "assigned") || c.AgentIP != cfg.AgentIP || c.Server[0] != cfg.Server[0] {
+				t.Fatalf("assigned config did not replace waiting bootstrap: %+v", c)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("assignment did not start collection")
+		}
+	}
+	send(assigned, false)
+	readScan()
+	if got := read(t, d.cachePath()); got != assigned.Ciphertext {
+		t.Fatal("remote-only service did not persist its encrypted assignment")
+	}
+	send(configFrame{Version: 1, Type: "config"}, false)
+	assertPaused(1100 * time.Millisecond)
+	if _, err := os.Stat(d.cachePath()); !os.IsNotExist(err) {
+		t.Fatal("unassignment did not clear cache")
+	}
+	// Reactivating the same state path requires releasing and reacquiring its
+	// runtime lock when the agent returns to waiting.
+	send(assigned, false)
+	readScan()
+	send(configFrame{Version: 1, Type: "config"}, false)
+	assertPaused(20 * time.Millisecond)
+}

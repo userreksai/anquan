@@ -30,6 +30,9 @@ func ServeWithConfigDelivery(ctx context.Context, c Config, writer io.Writer, ve
 		return err
 	}
 	defer unlock()
+	if err := delivery.persistConnectionSettings(); err != nil {
+		return err
+	}
 	return serveRuntime(ctx, NewSession(c), writer, version, func(c Config, writer io.Writer) (Report, OutputPaths, error) {
 		return runWithWriter(c, writer, false)
 	}, HeartbeatInterval, delivery)
@@ -47,12 +50,16 @@ func serveRuntime(ctx context.Context, c Config, writer io.Writer, version strin
 	if c.Interval() <= 0 {
 		return fmt.Errorf("check interval must be positive")
 	}
-	if err := os.MkdirAll(filepath.Dir(c.StateFile), 0700); err != nil {
-		return err
-	}
-	unlock, err := lockState(c.StateFile + ".service.lock")
-	if err != nil {
-		return err
+	unlock := func() {}
+	if !c.waitingForConfig {
+		if err := os.MkdirAll(filepath.Dir(c.StateFile), 0700); err != nil {
+			return err
+		}
+		var err error
+		unlock, err = lockState(c.StateFile + ".service.lock")
+		if err != nil {
+			return err
+		}
 	}
 	defer func() { unlock() }()
 	// Heartbeat errors and scan output may be written concurrently. os.Stdout
@@ -60,13 +67,20 @@ func serveRuntime(ctx context.Context, c Config, writer io.Writer, version strin
 	if writer != nil {
 		writer = &lockedWriter{writer: writer}
 	}
-	if err := LifecycleLog(c, writer, "service_started", map[string]any{"version": version, "pid": os.Getpid(), "interval_seconds": c.Interval().Seconds()}); err != nil {
-		return err
-	}
-	if ctx.Err() == nil {
-		heartbeatOnce(c, writer, version)
+	if c.waitingForConfig {
+		logWaitingForConfig(writer)
+	} else {
+		if err := LifecycleLog(c, writer, "service_started", map[string]any{"version": version, "pid": os.Getpid(), "interval_seconds": c.Interval().Seconds()}); err != nil {
+			return err
+		}
+		if ctx.Err() == nil {
+			heartbeatOnce(c, writer, version)
+		}
 	}
 	startWorkers := func(cfg Config) func() {
+		if cfg.waitingForConfig {
+			return func() {}
+		}
 		workerCtx, cancel := context.WithCancel(ctx)
 		var workers sync.WaitGroup
 		workers.Add(2)
@@ -90,20 +104,42 @@ func serveRuntime(ctx context.Context, c Config, writer io.Writer, version strin
 		go func() { defer close(done); delivery.run(deliveryCtx, updates) }()
 		defer func() { cancel(); <-done }()
 	}
-	ticker := time.NewTicker(c.Interval())
-	defer func() { ticker.Stop() }()
-	scanPending := true
+	var ticker *time.Ticker
+	var ticks <-chan time.Time
+	resetTicker := func() {
+		if ticker != nil {
+			ticker.Stop()
+		}
+		ticks = nil
+		if !c.waitingForConfig {
+			ticker = time.NewTicker(c.Interval())
+			ticks = ticker.C
+		}
+	}
+	resetTicker()
+	defer func() {
+		if ticker != nil {
+			ticker.Stop()
+		}
+	}()
+	scanPending := !c.waitingForConfig
 	var startup <-chan time.Time
-	if delivery != nil && len(delivery.endpoints) > 0 {
+	if !c.waitingForConfig && delivery != nil && len(delivery.endpoints) > 0 {
 		// Allow a reachable master to select the initial audit configuration.
 		// ACKs still go through this running service's activation path.
 		timer := time.NewTimer(3 * time.Second)
 		defer timer.Stop()
 		startup = timer.C
 	}
+	stopped := func() error {
+		if c.waitingForConfig {
+			return nil
+		}
+		return LifecycleLog(c, writer, "service_stopped", map[string]string{"reason": ctx.Err().Error()})
+	}
 	for {
 		if ctx.Err() != nil {
-			return LifecycleLog(c, writer, "service_stopped", map[string]string{"reason": ctx.Err().Error()})
+			return stopped()
 		}
 		// RunWithWriter persists detailed failure logs. Errors never stop later checks.
 		if scanPending && startup == nil {
@@ -114,20 +150,23 @@ func serveRuntime(ctx context.Context, c Config, writer io.Writer, version strin
 		}
 		select {
 		case <-ctx.Done():
-			return LifecycleLog(c, writer, "service_stopped", map[string]string{"reason": ctx.Err().Error()})
-		case <-ticker.C:
+			return stopped()
+		case <-ticks:
 			scanPending = true
 		case <-startup:
 			startup = nil
 		case update := <-updates:
 			next := update.config
 			var nextUnlock func()
-			applyErr := os.MkdirAll(filepath.Dir(next.StateFile), 0700)
-			if applyErr == nil && nativePathRules().key(next.StateFile) != nativePathRules().key(c.StateFile) {
-				nextUnlock, applyErr = lockState(next.StateFile + ".service.lock")
-			}
-			if applyErr == nil {
-				applyErr = LifecycleLog(next, writer, "configuration_validated", map[string]any{"interval_seconds": next.Interval().Seconds()})
+			var applyErr error
+			if !next.waitingForConfig {
+				applyErr = os.MkdirAll(filepath.Dir(next.StateFile), 0700)
+				if applyErr == nil && (c.waitingForConfig || nativePathRules().key(next.StateFile) != nativePathRules().key(c.StateFile)) {
+					nextUnlock, applyErr = lockState(next.StateFile + ".service.lock")
+				}
+				if applyErr == nil {
+					applyErr = LifecycleLog(next, writer, "configuration_validated", map[string]any{"interval_seconds": next.Interval().Seconds()})
+				}
 			}
 			if applyErr != nil {
 				if nextUnlock != nil {
@@ -147,19 +186,31 @@ func serveRuntime(ctx context.Context, c Config, writer io.Writer, version strin
 				update.result <- err
 				continue
 			}
-			if nextUnlock != nil {
+			if next.waitingForConfig {
+				unlock()
+				unlock = func() {}
+			} else if nextUnlock != nil {
 				unlock()
 				unlock = nextUnlock
 			}
 			c = NewSession(next)
 			startup = nil
 			stopWorkers = startWorkers(c)
-			ticker.Stop()
-			ticker = time.NewTicker(c.Interval())
-			scanPending = true
-			_ = LifecycleLog(c, writer, "configuration_applied", map[string]any{"interval_seconds": c.Interval().Seconds()})
+			resetTicker()
+			scanPending = !c.waitingForConfig
+			if c.waitingForConfig {
+				logWaitingForConfig(writer)
+			} else {
+				_ = LifecycleLog(c, writer, "configuration_applied", map[string]any{"interval_seconds": c.Interval().Seconds()})
+			}
 			update.result <- nil
 		}
+	}
+}
+
+func logWaitingForConfig(writer io.Writer) {
+	if writer != nil {
+		fmt.Fprintln(writer, "waiting for master configuration; connected agents can be selected in the platform; collection is paused")
 	}
 }
 

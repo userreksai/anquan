@@ -42,7 +42,8 @@ type configUpdate struct {
 	result chan error
 }
 
-// ConfigDelivery keeps transport and machine identity anchored to config.age.
+// ConfigDelivery keeps transport and machine identity anchored to deployment
+// settings (-master / environment) or optional config.age.
 // The first reachable master owns the connection until it disconnects.
 type ConfigDelivery struct {
 	bootstrap Config
@@ -142,6 +143,9 @@ func (d *ConfigDelivery) Sync(ctx context.Context) (Config, error) {
 		return d.current, errors.New("another service or check controls master configuration synchronization")
 	}
 	defer unlock()
+	if err := d.persistConnectionSettings(); err != nil {
+		return d.current, err
+	}
 	for _, endpoint := range d.endpoints {
 		conn, err := d.dial(ctx, "tcp", endpoint.tcp)
 		if err != nil {

@@ -7,6 +7,7 @@ Conflicts=anqu-oneshot.service
 Type=simple
 User=root
 UMask=0022
+EnvironmentFile=-/etc/anqu-agent.env
 ExecStart=/usr/local/anqu/anqu -service
 Restart=on-failure
 RestartSec=5

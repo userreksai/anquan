@@ -12,7 +12,7 @@ setup:
   interval_seconds: 300
 ```
 
-`agent_ip` 可省略：Agent 会使用连接该 Master 的 UDP socket 本地出口 IP。显式配置支持 IPv4、IPv6，拒绝未指定地址和组播地址。NAT 后不同机器可使用各自唯一的内网 IP；多个主控出口不同、多网卡或需要固定机器主键时应明确配置。此字段属于外置加密配置，修改后重新加密并替换程序旁的 `config.age`；单次运行下次启动读取，常驻服务重启生效，无需重新构建 Agent。
+`agent_ip` 可省略：Agent 会使用连接该 Master 的 UDP socket 本地出口 IP。显式配置支持 IPv4、IPv6，拒绝未指定地址和组播地址。NAT 后不同机器可使用各自唯一的内网 IP；多个主控出口不同、多网卡或需要固定机器主键时应明确配置。启动参数 `-agent-ip` 或环境变量 `ANQUAN_AGENT_IP` 优先于可选本地配置中的字段，常驻服务重启生效，无需重新构建 Agent。
 
 主控以 `ip` 为机器主键，`host` 仅作为主机名展示。接收旧 Agent 的报文缺少 `ip` 时，使用 UDP 数据报来源 IP。UDP 来源端口是临时端口，不能当作机器标识。机器 IP 变化会形成新的机器记录。该协议用于内网传输，无需认证或加密；主控开通对应 Agent 机器访问 `55555/udp` 的网络即可。
 
@@ -63,7 +63,11 @@ Master 收到首条有效心跳或检测事件时，按机器 IP 自动创建记
 
 ## TCP 配置下发（55556）
 
-Master 监听 `55556/tcp`，Agent 使用本地 `config.age` 的 `server` 主机地址主动连接同一 IP 的 55556 端口，无需在节点监听端口。TCP 配置通道独立于既有 UDP 事件通道；`server: []` 关闭两者。本地 `agent_ip` 优先作为机器主键，省略时使用访问该 Master 的 UDP 出口 IP，与事件身份一致。多个 Master 按本地列表顺序选择可达配置主控。
+Master 监听 `55556/tcp`，Agent 使用 `-master` / `ANQUAN_MASTER` 指定的主机地址，或可选本地 `config.age` 的 `server`，主动连接同一 IP 的 55556 端口，无需在节点监听端口。裸 IP 使用默认 UDP 55555，逗号分隔可配置多个主控，`IP:端口` 调整的是 UDP 上报端口。`-agent-ip` / `ANQUAN_AGENT_IP` 优先作为机器主键，省略时使用访问该 Master 的 UDP 出口 IP，与事件身份一致。多个 Master 按连接列表顺序选择可达配置主控。本地 `server: []` 且没有启动连接覆盖时关闭两种通信。
+
+v0.6.1 不要求本地 `config.age`：首次指定 Master 后自动保存 `agent.connection.json` 供后续无参数运行使用。无有效平台缓存或本地配置时，`-service` 只连接、注册并保持 TCP 心跳，等待下发，不开启巡检/登录/命令采集；Master 离线时持续重连。收到有效配置并完成运行环境检查和密文缓存后才启用采集并 ACK。主控明确取消分配时，无本地配置的 Agent 恢复等待，配置通道继续运行。
+
+无参数仍执行一次：已有平台缓存时可以离线采集并上报 SSH 登录；可达 Master 时先限时同步配置，随后执行一次并退出。首次既没有地址也没有配置时提示指定 Master；限时同步后仍未获得配置时退出 1。SSH 登录按有效配置的 enabled/source/回看范围采集，沿用持久游标，不因重新执行而重复上报已读记录。
 
 每帧是 UTF-8 JSON 加换行（NDJSON），最大 8 MiB，`version: 1`。JSON 字符串内的 age 密文换行使用 JSON 转义。第一帧：
 

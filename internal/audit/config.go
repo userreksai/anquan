@@ -33,7 +33,12 @@ type Config struct {
 	Setup             *SetupConfig             `json:"setup,omitempty" yaml:"setup,omitempty"`
 	location          *time.Location
 	session           *baselineSession
+	waitingForConfig  bool
 }
+
+// WaitingForConfig is true only for an agent with no local or assigned audit
+// configuration. Its transport may run, but collection must stay paused.
+func (c Config) WaitingForConfig() bool { return c.waitingForConfig }
 
 type MD5Config struct {
 	Enabled      bool     `json:"enabled" yaml:"enabled"`

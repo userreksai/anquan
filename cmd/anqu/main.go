@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -15,21 +16,24 @@ import (
 	"anqu/internal/sealed"
 )
 
-const version = "0.6.0"
+const version = "0.6.1"
 
 func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, sealed.Config, os.Executable))
 }
 
-// Agent nodes bootstrap from config.age and prefer validated master assignments.
+// Agent nodes bootstrap from deployment settings or optional config.age.
 // Single checks keep local logs without terminal output; services also log to stdout.
 func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), executable func() (string, error)) int {
 	flags := flag.NewFlagSet("anqu", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	showVersion := flags.Bool("version", false, "print program version")
 	service := flags.Bool("service", false, "run continuously using setup.interval_seconds")
+	master := flags.String("master", os.Getenv("ANQUAN_MASTER"), "Master IP or comma-separated IPs (optional UDP port, default 55555); connects to TCP 55556; env ANQUAN_MASTER")
+	agentIP := flags.String("agent-ip", os.Getenv("ANQUAN_AGENT_IP"), "optional stable machine IP; env ANQUAN_AGENT_IP")
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: anqu [-service] [-version]\nBootstraps from config.age beside the executable; master assignments override audit settings. Runs one silent check by default; -service keeps an outbound configuration connection.")
+		fmt.Fprintln(stderr, "Usage: anqu [-service] [-master IP] [-agent-ip IP] [-version]\nLocal config.age is optional: use -master / ANQUAN_MASTER once, then saved connection settings allow no-argument checks. Without an audit configuration, -service waits for platform assignment without scanning. Master configuration overrides local audit settings.")
+		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
 		if err == flag.ErrHelp {
@@ -48,32 +52,40 @@ func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), e
 	if !*service {
 		stdout, stderr = io.Discard, io.Discard
 	}
-	data, err := load()
-	if err != nil {
-		fmt.Fprintln(stderr, "encrypted configuration unavailable; check config.age beside the agent and its matching public key")
-		return 1
-	}
-	defer clear(data)
 	path, err := executable()
 	if err != nil {
 		fmt.Fprintln(stderr, "cannot locate executable directory")
 		return 1
 	}
-	cfg, err := audit.ParseConfig(data, filepath.Dir(path))
-	if err != nil {
-		fmt.Fprintln(stderr, "invalid encrypted YAML configuration; correct and encrypt config.age again")
+	baseDir := filepath.Dir(path)
+	data, err := load()
+	defer clear(data)
+	var cfg audit.Config
+	if err == nil {
+		cfg, err = audit.ParseConfig(data, baseDir)
+		if err != nil {
+			fmt.Fprintln(stderr, "invalid encrypted YAML configuration; correct and encrypt config.age again")
+			return 1
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintln(stderr, "encrypted configuration unavailable; check config.age beside the agent and its matching public key")
 		return 1
 	}
 	// Erase the decrypted source buffer as soon as parsing completes. Parsed Go
 	// values necessarily remain in process memory while the audit runs.
 	clear(data)
+	cfg, err = audit.BootstrapConfig(cfg, baseDir, *master, *agentIP)
+	if err != nil {
+		fmt.Fprintln(stderr, "invalid bootstrap settings:", err)
+		return 1
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	delivery := audit.NewConfigDelivery(cfg, filepath.Dir(path), version)
+	delivery := audit.NewConfigDelivery(cfg, baseDir, version)
 	if cached, err := delivery.CachedConfig(); err == nil {
 		cfg = cached
 	} else {
-		fmt.Fprintln(stderr, "master configuration cache unavailable; using local config.age")
+		fmt.Fprintln(stderr, "master configuration cache unavailable; retaining local configuration or waiting for assignment")
 	}
 	if *service {
 		if err := audit.ServeWithConfigDelivery(ctx, cfg, stdout, version, delivery); err != nil {
@@ -85,6 +97,9 @@ func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), e
 	syncCtx, cancelSync := context.WithTimeout(ctx, 3*time.Second)
 	cfg, _ = delivery.Sync(syncCtx)
 	cancelSync()
+	if cfg.WaitingForConfig() {
+		return 1
+	}
 	if err := audit.LifecycleLog(cfg, stdout, "agent_started", map[string]any{"version": version, "pid": os.Getpid(), "mode": "once"}); err != nil {
 		fmt.Fprintln(stderr, "cannot write startup log:", err)
 		return 1

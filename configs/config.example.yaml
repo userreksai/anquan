@@ -1,5 +1,6 @@
 # Anqu：在管理设置的 Age 配置加密页面编辑此 YAML，下载 config.age。
-# 将 config.age 放在 Agent 可执行文件旁边；无参数每次启动读取，常驻服务重启生效。
+# 本地 config.age 可选：-service -master MASTER_IP 可直接启动并等待平台下发，无需此文件。
+# 如需本地回退配置，将 config.age 放在 Agent 可执行文件旁边；启动读取。
 # 通用 Agent 构建无需 YAML：go run ./cmd/anqu-build -output ./dist/anquan -goos linux -goarch amd64
 # 页面直接加密，无需填写或管理密钥；使用配套新版 Agent 读取。
 # 配置区分大小写；fils 保留用户约定拼写；使用空格缩进。
@@ -68,7 +69,8 @@ login:
 
 # 默认只生成本地通知/日志/指标；主控 UDP 默认监听 55555。
 # 填写 server 后，Agent 还会主动连接同一主控 IP 的 TCP 55556 接收配置，无需开放 Agent 入站端口。
-# 本地 server/agent_ip 用于连接引导，不会被主控下发 YAML 覆盖；没有分配配置时使用本文件。
+# -master/ANQUAN_MASTER 和 -agent-ip/ANQUAN_AGENT_IP 优先于本地连接字段。
+# 连接引导不会被主控下发 YAML 覆盖；无分配且无本地文件时保持等待，不巡检。
 server: []
 # 有接收端后，将上面一行替换为：
 # server:

@@ -59,7 +59,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stdout, "agent=%s target=%s/%s\n", opts.output, opts.goos, opts.goarch)
-	fmt.Fprintln(stdout, "Deploy the agent and config.age together. Encrypt configuration in the management page; no key setup required.")
+	fmt.Fprintln(stdout, "Deploy the agent with -service -master MASTER_IP to receive platform configuration, or provide optional config.age beside it. No key setup required.")
 	fmt.Fprintln(stdout, "Embedded encryption increases extraction cost; administrators and reverse engineers can still recover it.")
 	return nil
 }
