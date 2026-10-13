@@ -116,7 +116,7 @@ func TestSingleSyncDoesNotWriteCacheControlledByRunningService(t *testing.T) {
 	if err := d.accept(assigned, commitAssignment); err != nil {
 		t.Fatal(err)
 	}
-	unlock, err := lockState(d.cachePath() + ".service.lock")
+	unlock, err := lockService(d.cachePath())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,12 +150,9 @@ func TestOfflineAgentDoesNotRequireWritableExecutableDirectory(t *testing.T) {
 	cfg.masters = nil
 	programDir := filepath.Join(base, "program")
 	d := NewConfigDelivery(cfg, programDir, "test")
-	// A directory at the would-be lock filename makes any attempt to open it
-	// fail on Windows and Unix, without depending on root/ACL permission rules.
-	lockPath := d.cachePath() + ".service.lock"
-	if err := os.MkdirAll(lockPath, 0700); err != nil {
-		t.Fatal(err)
-	}
+	// A regular file where the lock's parent directory would be makes any
+	// attempt to create the lock fail on Windows and Unix, including as root.
+	put(t, programDir, "not a directory")
 	d.dial = func(context.Context, string, string) (net.Conn, error) {
 		t.Fatal("offline agent attempted to contact a master")
 		return nil, nil
@@ -172,9 +169,8 @@ func TestOfflineAgentDoesNotRequireWritableExecutableDirectory(t *testing.T) {
 	if !writer.scanned {
 		t.Fatal("offline service did not complete its initial scan")
 	}
-	entries, err := os.ReadDir(programDir)
-	if err != nil || len(entries) != 1 || entries[0].Name() != filepath.Base(lockPath) || !entries[0].IsDir() {
-		t.Fatalf("offline agent changed executable directory: %v %v", entries, err)
+	if got := read(t, programDir); got != "not a directory" {
+		t.Fatalf("offline agent changed executable directory: %q", got)
 	}
 }
 
@@ -317,7 +313,7 @@ func TestServiceConfigDeliveryReloadsWithoutRestartAndMaintainsPingDuringScan(t 
 	if err := os.MkdirAll(filepath.Dir(lockedConfig.StateFile), 0700); err != nil {
 		t.Fatal(err)
 	}
-	unlock, err := lockState(lockedConfig.StateFile + ".service.lock")
+	unlock, err := lockService(lockedConfig.StateFile)
 	if err != nil {
 		t.Fatal(err)
 	}

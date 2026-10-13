@@ -73,7 +73,7 @@ type CheckEntry struct {
 
 func decodeYAML(data []byte) (Config, error) {
 	c := Config{
-		OutputDir: "/usr/local/anqu", StateFile: "state/md5.json", Timezone: "Asia/Shanghai",
+		OutputDir: "/usr/local/anquan", StateFile: "state/md5.json", Timezone: "Asia/Shanghai",
 		MD5:       MD5Config{Enabled: true, Recursive: true},
 		Login:     LoginConfig{Enabled: true, Source: "wtmp", Path: "/var/log/wtmp", LastCommand: "last", JournalCommand: "journalctl", InitialLookbackHours: 24, TimeoutSeconds: 10, MaxRecords: 1000},
 		Existence: ExistenceConfig{Enabled: true},

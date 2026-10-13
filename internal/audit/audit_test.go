@@ -84,11 +84,10 @@ func TestLifecycleAndOutput(t *testing.T) {
 	if read(t, paths.Prom) != read(t, paths.Latest) {
 		t.Fatal("archive and latest metrics differ")
 	}
-	var decoded Report
-	if err := readJSON(paths.JSON, &decoded); err != nil || !decoded.Success {
-		t.Fatalf("invalid report: %v", err)
+	if paths.JSON != "" {
+		t.Fatalf("obsolete JSON report path is still published: %s", paths.JSON)
 	}
-	if decoded.Login.Record.User != "ops" || decoded.Login.Record.Terminal != "pts/1" {
+	if r.Login.Record.User != "ops" || r.Login.Record.Terminal != "pts/1" {
 		t.Fatal("missing login details")
 	}
 	put(t, filepath.Join(root, "app.conf"), "changed and longer\n")
@@ -126,6 +125,10 @@ func TestLifecycleAndOutput(t *testing.T) {
 	latest, _ := filepath.Glob(filepath.Join(c.OutputDir, "textfile", "*.prom"))
 	if len(latest) != 1 {
 		t.Fatal("duplicate latest metrics")
+	}
+	reports, err := filepath.Glob(filepath.Join(c.OutputDir, "*.json"))
+	if err != nil || len(reports) != 0 {
+		t.Fatalf("scans created obsolete JSON reports: %v %v", reports, err)
 	}
 }
 

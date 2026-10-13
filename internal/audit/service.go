@@ -25,7 +25,7 @@ func ServeWithConfigDelivery(ctx context.Context, c Config, writer io.Writer, ve
 	if delivery == nil || len(delivery.endpoints) == 0 {
 		return Serve(ctx, c, writer, version)
 	}
-	unlock, err := lockState(delivery.cachePath() + ".service.lock")
+	unlock, err := lockService(delivery.cachePath())
 	if err != nil {
 		return err
 	}
@@ -56,7 +56,7 @@ func serveRuntime(ctx context.Context, c Config, writer io.Writer, version strin
 			return err
 		}
 		var err error
-		unlock, err = lockState(c.StateFile + ".service.lock")
+		unlock, err = lockService(c.StateFile)
 		if err != nil {
 			return err
 		}
@@ -162,7 +162,7 @@ func serveRuntime(ctx context.Context, c Config, writer io.Writer, version strin
 			if !next.waitingForConfig {
 				applyErr = os.MkdirAll(filepath.Dir(next.StateFile), 0700)
 				if applyErr == nil && (c.waitingForConfig || nativePathRules().key(next.StateFile) != nativePathRules().key(c.StateFile)) {
-					nextUnlock, applyErr = lockState(next.StateFile + ".service.lock")
+					nextUnlock, applyErr = lockService(next.StateFile)
 				}
 				if applyErr == nil {
 					applyErr = LifecycleLog(next, writer, "configuration_validated", map[string]any{"interval_seconds": next.Interval().Seconds()})

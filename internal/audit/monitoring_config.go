@@ -6,7 +6,6 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -95,14 +94,6 @@ func normalizeMonitoring(c *Config, base string, rules pathRules) error {
 			return fmt.Errorf("server: %w", err)
 		}
 		c.Server[i] = endpoint
-		host, port, err := net.SplitHostPort(endpoint)
-		if err != nil || net.ParseIP(host) == nil {
-			return fmt.Errorf("server entry must be an IP:port (IPv6 in brackets): %q", endpoint)
-		}
-		n, err := strconv.Atoi(port)
-		if err != nil || n < 1 || n > 65535 {
-			return fmt.Errorf("invalid UDP port: %q", endpoint)
-		}
 		if seen[endpoint] {
 			return fmt.Errorf("duplicate server: %q", endpoint)
 		}

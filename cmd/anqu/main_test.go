@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -14,8 +15,92 @@ import (
 	"time"
 
 	"anqu/internal/audit"
+	"anqu/internal/install"
 	"anqu/internal/sealed"
 )
+
+// Runtime tests inject deployment so they never install into the test host.
+func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), executable func() (string, error)) int {
+	return runPrepared(args, stdout, stderr, load, executable, func(path string, _ []string, _ io.Writer) (install.Preparation, error) {
+		return install.Preparation{Path: path}, nil
+	})
+}
+
+func logEvents(t *testing.T, directory, event string) []json.RawMessage {
+	t.Helper()
+	paths, err := filepath.Glob(filepath.Join(directory, "*.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []json.RawMessage
+	for _, path := range paths {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		for {
+			var entry struct {
+				Event string
+				Data  json.RawMessage
+			}
+			if err := decoder.Decode(&entry); err == io.EOF {
+				break
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			if entry.Event == event {
+				events = append(events, entry.Data)
+			}
+		}
+	}
+	return events
+}
+
+func assertNoReports(t *testing.T, directory string) {
+	t.Helper()
+	reports, err := filepath.Glob(filepath.Join(directory, "*.json"))
+	if err != nil || len(reports) != 0 {
+		t.Fatalf("timestamped JSON reports remain: %v %v", reports, err)
+	}
+}
+
+func TestPreparationPrecedesConfigurationAndHelpHasNoSideEffects(t *testing.T) {
+	for _, args := range [][]string{{"-help"}, {"-version"}, {"-invalid"}, nil} {
+		var stdout, stderr bytes.Buffer
+		prepared := false
+		code := runPrepared(args, &stdout, &stderr, func() ([]byte, error) {
+			t.Fatal("configuration loaded after failed installation")
+			return nil, nil
+		}, func() (string, error) { return "uploaded-agent", nil }, func(path string, received []string, _ io.Writer) (install.Preparation, error) {
+			prepared = true
+			if path != "uploaded-agent" || len(received) != 0 {
+				t.Fatal("wrong deployment inputs")
+			}
+			return install.Preparation{}, errors.New("first deployment requires root")
+		})
+		if len(args) == 0 {
+			if code != 1 || !prepared || !strings.Contains(stderr.String(), "requires root") {
+				t.Fatalf("installation failure: %d %t %q", code, prepared, stderr.String())
+			}
+		} else if prepared {
+			t.Fatal("help/version/invalid argument performed installation")
+		}
+	}
+}
+
+func TestFreshNodeServiceInstallationReturnsWithoutDuplicateForegroundAudit(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	code := runPrepared(nil, &stdout, &stderr, func() ([]byte, error) {
+		t.Fatal("installation-only launch tried to start auditing")
+		return nil, os.ErrNotExist
+	}, func() (string, error) { return "uploaded-agent", nil }, func(string, []string, io.Writer) (install.Preparation, error) {
+		return install.Preparation{Path: install.Executable, InstallOnly: true}, nil
+	})
+	if code != 0 || stderr.Len() != 0 {
+		t.Fatalf("fresh install failed: %d %q", code, stderr.String())
+	}
+}
 
 func TestAgentRejectsExternalConfigWithoutLoadingPayload(t *testing.T) {
 	for _, args := range [][]string{{"-config", "secret.yaml"}, {"-check-config"}, {"secret.yaml"}, {"-dump-config"}, {"-once"}} {
@@ -37,6 +122,9 @@ func TestAgentHelpAndVersionDoNotLoadConfig(t *testing.T) {
 		}
 		if arg == "-version" && stdout.String() != "anqu "+version+"\n" {
 			t.Fatal("unexpected version output")
+		}
+		if arg == "-help" && (!strings.Contains(stderr.String(), "sa.sa.ops.tw") || !strings.Contains(stderr.String(), "agent.service")) {
+			t.Fatal("help omits the fixed-domain service installation")
 		}
 	}
 }
@@ -87,7 +175,7 @@ func TestAgentUsesExecutableDirectoryWithoutConfigFile(t *testing.T) {
 	}
 }
 
-func TestAgentFindingsExitTwoAndPreserveRealPathsInReports(t *testing.T) {
+func TestAgentFindingsExitTwoAndPreserveRealPathsInLogs(t *testing.T) {
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer
 	data := []byte("output_dir: output\nmd5:\n  enabled: false\nlogin:\n  enabled: false\nexistence:\n  base_dir: watched\n  files:\n    - path: missing.conf\n")
@@ -95,13 +183,10 @@ func TestAgentFindingsExitTwoAndPreserveRealPathsInReports(t *testing.T) {
 	if code != 2 || stdout.Len() != 0 || stderr.Len() != 0 {
 		t.Fatalf("code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	reports, err := filepath.Glob(filepath.Join(dir, "output", "*.json"))
-	if err != nil || len(reports) != 1 {
-		t.Fatalf("reports=%v err=%v", reports, err)
-	}
-	b, err := os.ReadFile(reports[0])
-	if err != nil || !strings.Contains(string(b), "missing.conf") {
-		t.Fatalf("real path absent from findings: %v", err)
+	assertNoReports(t, filepath.Join(dir, "output"))
+	alerts := logEvents(t, filepath.Join(dir, "output", "logs"), "alert")
+	if len(alerts) == 0 || !bytes.Contains(alerts[0], []byte("missing.conf")) {
+		t.Fatalf("real path absent from findings: %s", alerts)
 	}
 }
 
@@ -123,30 +208,27 @@ func TestAgentEachInvocationUsesCurrentConfigAndFreshBaseline(t *testing.T) {
 			t.Fatalf("fresh invocation rejected config/current content: code=%d stderr=%s", code, stderr.String())
 		}
 	}
-	reports, err := filepath.Glob(filepath.Join(dir, "output", "*.json"))
-	if err != nil || len(reports) != 3 {
-		t.Fatalf("missing reports: %v %v", reports, err)
+	assertNoReports(t, filepath.Join(dir, "output"))
+	results := logEvents(t, filepath.Join(dir, "logs"), "files_result")
+	if len(results) != 3 {
+		t.Fatalf("missing file results: %d", len(results))
 	}
-	for _, path := range reports {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var report audit.Report
-		if err := json.Unmarshal(data, &report); err != nil || !report.Files.BaselineCreated || len(report.Files.Changes) != 0 {
-			t.Fatalf("invocation reused previous lifetime baseline: %+v %v", report.Files, err)
+	for _, data := range results {
+		var files audit.FilesResult
+		if err := json.Unmarshal(data, &files); err != nil || !files.BaselineCreated || len(files.Changes) != 0 {
+			t.Fatalf("invocation reused previous lifetime baseline: %+v %v", files, err)
 		}
 	}
 }
 
-func TestAgentMissingLocalConfigRequiresMasterAndDoesNotScan(t *testing.T) {
-	t.Setenv("ANQUAN_MASTER", "")
+func TestAgentInvalidMasterDoesNotScan(t *testing.T) {
+	t.Setenv("ANQUAN_MASTER", "http://sa.sa.ops.tw/")
 	t.Setenv("ANQUAN_AGENT_IP", "")
 	base := t.TempDir()
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"-service"}, &stdout, &stderr, func() ([]byte, error) { return nil, os.ErrNotExist }, func() (string, error) { return filepath.Join(base, "anqu"), nil })
-	if code != 1 || !strings.Contains(stderr.String(), "ANQUAN_MASTER") {
-		t.Fatalf("missing connection settings error is not actionable: %d %q", code, stderr.String())
+	if code != 1 || !strings.Contains(stderr.String(), "invalid bootstrap settings") {
+		t.Fatalf("invalid Master was not rejected: %d %q", code, stderr.String())
 	}
 	if entries, _ := os.ReadDir(base); len(entries) != 0 {
 		t.Fatal("missing configuration created collection output")
@@ -177,7 +259,8 @@ func TestAgentCachedMasterConfigStartsWithoutLocalConfig(t *testing.T) {
 			if code != 0 || stdout.Len() != 0 || stderr.Len() != 0 {
 				t.Fatalf("cached master config could not run without config.age: %d %s %s", code, stdout.String(), stderr.String())
 			}
-			if reports, _ := filepath.Glob(filepath.Join(base, "assigned", "*.json")); len(reports) != 1 {
+			assertNoReports(t, filepath.Join(base, "assigned"))
+			if results := logEvents(t, filepath.Join(base, "assigned", "logs"), "scan_complete"); len(results) != 1 {
 				t.Fatal("cached master configuration was not collected")
 			}
 			if _, err := os.Stat(filepath.Join(base, sealed.ConfigFilename)); !os.IsNotExist(err) {
@@ -187,9 +270,9 @@ func TestAgentCachedMasterConfigStartsWithoutLocalConfig(t *testing.T) {
 	}
 }
 
-func TestNoArgumentCheckFetchesMasterConfigAndReportsSSHLogin(t *testing.T) {
+func TestNoArgumentHostnameCheckFetchesMasterConfigAndReportsSSHLogin(t *testing.T) {
 	base := t.TempDir()
-	tcp, err := net.Listen("tcp", "127.0.0.2:55556")
+	tcp, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +282,11 @@ func TestNoArgumentCheckFetchesMasterConfigAndReportsSSHLogin(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer udp.Close()
-	t.Setenv("ANQUAN_MASTER", "127.0.0.2")
+	_, port, err := net.SplitHostPort(tcp.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ANQUAN_MASTER", net.JoinHostPort("localhost", port))
 	t.Setenv("ANQUAN_AGENT_IP", "10.0.0.28")
 	loginPath := filepath.Join(base, "login.jsonl")
 	putLogin := func(id string) {
@@ -292,7 +379,8 @@ func TestNoArgumentCheckFetchesMasterConfigAndReportsSSHLogin(t *testing.T) {
 	t.Setenv("ANQUAN_AGENT_IP", "")
 	putLogin("second-login")
 	runCheck("second-login")
-	if reports, _ := filepath.Glob(filepath.Join(base, "assigned", "*.json")); len(reports) != 2 {
+	assertNoReports(t, filepath.Join(base, "assigned"))
+	if results := logEvents(t, filepath.Join(base, "assigned", "logs"), "scan_complete"); len(results) != 2 {
 		t.Fatal("no-argument invocation did not perform exactly one scan")
 	}
 }

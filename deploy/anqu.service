@@ -1,14 +1,14 @@
 [Unit]
 Description=Anqu continuous security monitoring agent
 After=local-fs.target network.target
-Conflicts=anqu-oneshot.service
+Conflicts=anqu-oneshot.service agent.service
 
 [Service]
 Type=simple
 User=root
 UMask=0022
 EnvironmentFile=-/etc/anqu-agent.env
-ExecStart=/usr/local/anqu/anqu -service
+ExecStart=/usr/local/anquan/anquan -service
 Restart=on-failure
 RestartSec=5
 LimitCORE=0

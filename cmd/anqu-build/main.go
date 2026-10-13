@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"anqu/internal/audit"
+	"anqu/internal/defaults"
 	"anqu/internal/sealed"
 )
 
@@ -59,7 +60,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stdout, "agent=%s target=%s/%s\n", opts.output, opts.goos, opts.goarch)
-	fmt.Fprintln(stdout, "Deploy the agent with -service -master MASTER_IP to receive platform configuration, or provide optional config.age beside it. No key setup required.")
+	fmt.Fprintln(stdout, "Run the Linux agent as root without arguments to install and start agent.service using "+defaults.MasterAddress+". Optional config.age remains a local fallback; no key setup required.")
 	fmt.Fprintln(stdout, "Embedded encryption increases extraction cost; administrators and reverse engineers can still recover it.")
 	return nil
 }

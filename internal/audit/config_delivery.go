@@ -137,7 +137,7 @@ func (d *ConfigDelivery) Sync(ctx context.Context) (Config, error) {
 	if len(d.endpoints) == 0 {
 		return d.current, nil
 	}
-	unlock, err := lockState(d.cachePath() + ".service.lock")
+	unlock, err := lockService(d.cachePath())
 	if err != nil {
 		return d.current, errors.New("another service or check controls master configuration synchronization")
 	}

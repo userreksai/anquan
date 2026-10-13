@@ -13,25 +13,27 @@ import (
 	"time"
 
 	"anqu/internal/audit"
+	"anqu/internal/defaults"
+	"anqu/internal/install"
 	"anqu/internal/sealed"
 )
 
-const version = "0.6.2"
+const version = "0.6.4"
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, sealed.Config, os.Executable))
+	os.Exit(runPrepared(os.Args[1:], os.Stdout, os.Stderr, sealed.Config, os.Executable, install.Prepare))
 }
 
 // Agent nodes bootstrap from deployment settings or optional config.age.
 // Single checks keep local logs without terminal output; services also log to stdout.
-func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), executable func() (string, error)) int {
+func runPrepared(args []string, stdout, stderr io.Writer, load func() ([]byte, error), executable func() (string, error), prepare func(string, []string, io.Writer) (install.Preparation, error)) int {
 	flags := flag.NewFlagSet("anqu", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	showVersion := flags.Bool("version", false, "print program version")
 	service := flags.Bool("service", false, "run continuously using setup.interval_seconds")
-	master := flags.String("master", os.Getenv("ANQUAN_MASTER"), "configuration Master IP or comma-separated IPs (optional TCP port, default 55556); env ANQUAN_MASTER; independent of YAML UDP server list")
+	master := flags.String("master", os.Getenv("ANQUAN_MASTER"), "configuration Master hostname or IP, optionally comma-separated (TCP port defaults to 55556); env ANQUAN_MASTER; fresh nodes default to "+defaults.MasterAddress+"; independent of YAML UDP server list")
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: anqu [-service] [-master IP] [-version]\nUse -master / ANQUAN_MASTER once for TCP configuration delivery and automatic source-IP discovery. YAML server controls UDP reporting only. Local config.age is optional; saved connection settings allow no-argument checks. Without an audit configuration, -service waits for platform assignment without scanning.")
+		fmt.Fprintln(stderr, "Usage: anqu [-service] [-master HOST[:PORT]] [-version]\nOn a fresh Linux node, run as root without arguments to install and start agent.service using "+defaults.MasterAddress+". Use -master / ANQUAN_MASTER for explicit TCP configuration delivery and automatic source-IP discovery. YAML server controls UDP reporting only. Local config.age is optional; saved connection settings allow no-argument checks. Without an audit configuration, -service waits for platform assignment without scanning.")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
@@ -48,13 +50,22 @@ func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), e
 		fmt.Fprintln(stdout, "anqu "+version)
 		return 0
 	}
-	if !*service {
-		stdout, stderr = io.Discard, io.Discard
-	}
 	path, err := executable()
 	if err != nil {
 		fmt.Fprintln(stderr, "cannot locate executable directory")
 		return 1
+	}
+	prepared, err := prepare(path, args, stdout)
+	if err != nil {
+		fmt.Fprintln(stderr, "agent installation failed:", err)
+		return 1
+	}
+	if prepared.InstallOnly {
+		return 0
+	}
+	path = prepared.Path
+	if !*service {
+		stdout, stderr = io.Discard, io.Discard
 	}
 	baseDir := filepath.Dir(path)
 	data, err := load()
@@ -109,7 +120,7 @@ func run(args []string, stdout, stderr io.Writer, load func() ([]byte, error), e
 		return 1
 	}
 	if !report.Success {
-		fmt.Fprintf(stderr, "audit collection failed (%d errors); see generated report\n", len(report.Errors))
+		fmt.Fprintf(stderr, "audit collection failed (%d errors); see agent log\n", len(report.Errors))
 		return 1
 	}
 	if _, err := audit.PollHistory(cfg, stdout); err != nil {

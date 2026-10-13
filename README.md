@@ -1,8 +1,8 @@
-# Anqu 安全检测 Agent（v0.6.2）
+# Anqu 安全检测 Agent（v0.6.4）
 
-Anqu 在 Linux 节点持续检查文件 MD5、文件增删和进程变化，并逐条记录成功的 SSH 登录。服务启动时记录当前时间，每轮输出当前主机的完整检测结果、告警、JSON 报告，并更新固定路径的 Prometheus 文件。运行日志按北京时间零点切换文件。
+Anqu 在 Linux 节点持续检查文件 MD5、文件增删和进程变化，并逐条记录成功的 SSH 登录。服务启动时记录当前时间，每轮将当前主机的完整检测结果和告警写入日志，并更新固定路径的 Prometheus 文件。运行日志按北京时间零点切换文件，不再生成时间戳命名的单轮 JSON 报告。
 
-本目录是 [anquan Agent](https://github.com/userreksai/anquan)。Agent 通过可配置的 UDP 接口向 [Master 主控](https://github.com/userreksai/anquan-server-master) 上报，默认关闭联网。详细需求对应关系见 [需求与实现说明](docs/需求与实现说明.md)，字段约定见 [Agent / Master 协议](docs/agent-master-protocol.md)。
+本目录是 [anquan Agent](https://github.com/userreksai/anquan)。新机器自动连接固定主控域名 `sa.sa.ops.tw:55556/TCP` 接收配置，通过配置中的 UDP `server` 列表向 [Master 主控](https://github.com/userreksai/anquan-server-master) 上报；UDP 默认关闭。详细需求对应关系见 [需求与实现说明](docs/需求与实现说明.md)，字段约定见 [Agent / Master 协议](docs/agent-master-protocol.md)。
 
 配套主控与 Vue 前端的安装、端口、默认登录和密码重置见 [安全中心主控部署](docs/主控部署.md)。
 
@@ -16,27 +16,28 @@ Agent 支持平台下发配置和可选的外置 age 加密配置：构建时只
 
 ### 页面下发配置
 
-无需先部署 `config.age`。指定 Master IP 后运行常驻服务：
+无需先部署 `config.age`。新 Linux 机器以 root 无参数执行对应架构的 Agent，即可自动安装并启动常驻服务：
 
 ```sh
-./dist/anquan -service -master 8.217.222.30
-# 也可使用环境变量；不需要 ANQUAN_AGENT_IP。
-ANQUAN_MASTER=8.217.222.30 ./dist/anquan -service
+chmod +x ./anquan
+sudo ./anquan
+sudo systemctl status agent.service --no-pager
+sudo journalctl -u agent.service -n 50 --no-pager
 ```
 
-Agent 使用 `-master` / `ANQUAN_MASTER` 独立指定配置主控，裸 IP 默认连接 **55556/TCP**，也支持 IP:TCP端口和逗号分隔的配置主控列表。此地址不取自 YAML 的 `server`，也不覆盖 UDP 上报列表。Agent 不监听端口；首次没有配置或 Master 离线时保持运行并重连，收到有效配置后自动开始采集。
+自动生成的 `agent.service` 固定使用 `sa.sa.ops.tw`，不带端口默认连接 **55556/TCP**。前台和单次模式仍支持 `-master` / `ANQUAN_MASTER`，接受域名、IP、显式端口和逗号分隔的配置主控列表；填写主机名，不带 `http://`、路径或 `/`。域名保留在连接设置中，每次建立连接时解析，DNS 暂时不可用不会阻止服务安装。此地址不取自 YAML 的 `server`，也不覆盖 UDP 上报列表。Agent 不监听端口；首次没有配置或 Master 离线时保持运行并重连，收到有效配置后自动开始采集。
 
 Agent 在 TCP 握手中请求 IP 识别，Master 返回实际连接来源地址；跨公网 NAT 直连时就是主控看到的公网出口 IP。Agent 将此 IP 用于向所有 UDP 主控上报，并自动保存供重启和无参数运行使用。无需填写 `agent_ip` 或 `ANQUAN_AGENT_IP`；旧 YAML 中的 agent_ip 与旧连接文件中的手工 IP 被忽略。未取得识别结果时 UDP 的 ip 字段为空，由接收 Master 根据实际数据报来源登记，避免把内网 socket 地址误当公网 IP。Master 和 Agent 必须配套升级，TCP 仅传配置及握手/心跳信息，检测数据继续使用 UDP。
 
-systemd 可在服务的 `[Service]` 中设置 `Environment=ANQUAN_MASTER=8.217.222.30`，原 `ExecStart=... -service` 无需修改。仓库提供的 `deploy/anqu.service` 还支持从可选 `/etc/anqu-agent.env` 读取环境变量。
+自动单元在 `[Service]` 中设置 `Environment=ANQUAN_MASTER=sa.sa.ops.tw`，并通过 `ExecStart=/usr/local/anquan/anquan -service -master sa.sa.ops.tw` 固定连接域名。原有 `master.conf` 的环境变量不能覆盖这个启动参数；已有其它 systemd drop-in 保留，升级旧机器时须核对是否覆盖了 `ExecStart`。仓库的 `deploy/agent.service` 与自动安装单元一致；旧 `deploy/anqu.service` 仍供手工部署使用。
 
-首次指定 Master 后，Agent 自动保存程序旁的 `agent.connection.json`（仅主控地址和机器标识，不含巡检 YAML），无需手工创建。此后手工执行 `./dist/anquan` 不需要任何参数或环境变量：使用已有平台缓存或限时获取下发配置，执行一次巡检并上报 SSH 登录后退出。登录是否开启、来源和回看范围使用平台/本地有效配置，登录游标继续保留。等待配置的常驻服务保持 TCP hello/ping 在线，首次配置到达前不采集登录。
+Agent 自动将主控地址和机器标识加密保存为 `/usr/local/anquan/agent.connection.age`，无需手工创建；旧 `agent.connection.json` 成功加密迁移后删除。默认域名内置为 `sa.sa.ops.tw`，解析后的主控 IP 不固定在程序中。此后手工执行 `sudo /usr/local/anquan/anquan` 不需要任何参数或环境变量：使用已有平台缓存或限时获取下发配置，执行一次巡检并上报 SSH 登录后退出。登录是否开启、来源和回看范围使用平台/本地有效配置，登录游标继续保留。等待配置的常驻服务保持 TCP hello/ping 在线，首次配置到达前不采集登录。
 
 在“管理设置 → Age 配置加密”编辑 YAML，点击“下发配置”，选择目标机器并确认。Master 按机器保存加密配置，在线机器通过现有长连接接收；离线机器重连后自动接收。页面显示待下发、已应用或应用失败，已应用以 Agent 完成校验、保存和切换后的确认消息为准。非法 YAML 或无法应用的配置不会覆盖 Agent 当前有效配置。
 
 主控下发的配置以 `config.master.age` 原子保存在 Agent 可执行文件旁，优先于本地 `config.age`；重启或主控暂时不可达时仍使用有效缓存，无需补建本地配置。主控明确返回未给本机分配配置时，Agent 清除主控缓存并恢复本地配置；没有本地配置则继续等待，不执行巡检。常驻模式在当前扫描完成后切换并立即按新配置扫描；无参数单次模式只在启动时限时同步，仍没有配置时返回 1。切换配置会重新建立文件/进程基线，登录和命令游标沿用对应状态路径。
 
-本地 `config.age` 为可选巡检回退配置。配置主控的优先级为启动参数、ANQUAN_MASTER、自动保存的连接地址；它与 YAML 的 UDP `server` 列表完全独立。下发 YAML 的 server 列表可立即切换 UDP 目标，不影响配置 TCP 连接或自动识别的机器 IP。多个配置主控按连接列表顺序选择，数据向 server 中的全部地址上报；server: [] 仅关闭 UDP。首次无保存地址且没有设置配置主控时，无本地配置的 Agent 提示设置 ANQUAN_MASTER；仅本地巡检仍可独立运行。程序目录须允许写入配置缓存和连接信息。协议见 [Agent / Master 协议](docs/agent-master-protocol.md)。
+本地 `config.age` 为可选巡检回退配置。前台和单次模式的配置主控优先级为启动参数、ANQUAN_MASTER、自动保存的连接地址；没有本地配置和保存地址时使用 `sa.sa.ops.tw`。仅本地巡检仍可独立运行。配置 TCP 与 YAML 的 UDP `server` 列表完全独立；UDP 也支持域名，例如 `server: [sa.sa.ops.tw:55555]`，裸域名或 IP 默认使用 UDP 55555。下发 YAML 的 server 列表可立即切换 UDP 目标，不影响配置 TCP 连接或自动识别的机器 IP。多个配置主控按连接列表顺序选择，数据向 server 中的全部地址上报；server: [] 仅关闭 UDP。域名直接解析到主控不会改变机器来源 IP；普通中转代理仍受来源 IP 识别限制。程序目录须允许写入配置缓存和连接信息。协议见 [Agent / Master 协议](docs/agent-master-protocol.md)。
 
 构建机需要 Go 1.25 或更新版本。首次构建会下载 age 和 YAML 依赖。
 
@@ -58,27 +59,29 @@ Agent 和 Master 代码内置一组固定配套密钥，构建不会重新生成
 ```text
 /usr/local/anquan/
   anquan
-  config.age
+  agent.connection.age
+  config.master.age
+  config.age             # 可选本地回退配置
 ```
 
 使用本地回退配置时，保留密文完整的 `-----BEGIN AGE ENCRYPTED FILE-----` / `-----END AGE ENCRYPTED FILE-----` 标记。替换时先上传临时文件，再在同一文件系统重命名为 `config.age`，避免运行期间读到一半文件。明文、截断、公钥不匹配或无法读取的本地配置仍会被拒绝；只有文件不存在时进入平台配置启动流程，不将损坏配置当作缺失。单次运行保持静默，失败退出码为 1；常驻模式会输出错误到服务日志。
 
-本地演示使用相对路径、JSONL 模拟登录及独立输出目录，不需要系统日志或进程权限：
+Windows 本地演示使用相对路径、JSONL 模拟登录及独立输出目录，不需要系统日志或进程权限：
 
 ```sh
-go run ./cmd/anqu-build -config ./demo/config.yaml -output ./demo/anqu -goos linux -goarch amd64
-./demo/anqu
+go run ./cmd/anqu-build -config ./demo/config.yaml -output ./demo/anqu.exe -goos windows -goarch amd64
+./demo/anqu.exe
 # 修改 demo/watched/app.conf 后再执行，查看 modified；第三次无修改则恢复 unchanged。
 ```
 
-Windows 开发演示可使用 `-goos windows -output ./demo/anqu.exe`。生产进程监控依赖 Linux `/proc`。演示登录记录是固定测试数据，JSONL 首轮读取其中尚未记录的条目。
+Linux 普通启动会安装到标准目录，需在测试节点以 root 验证。生产进程监控依赖 Linux `/proc`。演示登录记录是固定测试数据，JSONL 首轮读取其中尚未记录的条目。
 
 ## 配置格式
 
 完整中文模板见 [config.example.yaml](configs/config.example.yaml)。字段区分大小写：`FilesMonitoring`、`ProcessMonitoring`、`Process`、`fils` 均按以下拼写。每条路径/命令规则是一个 YAML 字符串；使用空格缩进。未知字段、非法 MD5、重复规则及多个 YAML 文档会被拒绝。
 
 ```yaml
-output_dir: /usr/local/anqu
+output_dir: /usr/local/anquan
 state_file: state/md5.json
 timezone: Asia/Shanghai
 
@@ -122,7 +125,7 @@ setup:
 
 `FilesMonitoring` 或 `ProcessMonitoring` 整段省略可关闭对应模块；`login.enabled: false` 关闭登录采集。新格式自动关闭旧 `md5`、`existence` 默认模块，旧格式仍兼容。不要用空的顶层监控段代替省略。
 
-相对路径以节点可执行程序所在目录为基准，`state_file` 相对于 `output_dir`。路径不展开 shell 变量、`~` 或通配符。`server` 接受 IP 和端口，IPv6 写作 `[2001:db8::1]:55555`。`interval_seconds` 默认 300，范围 1–86400，仅用于 `-service` 模式。
+相对路径以节点可执行程序所在目录为基准，`state_file` 相对于 `output_dir`。`output_dir` 默认 `/usr/local/anquan`，显式配置的路径继续按原设置使用。路径不展开 shell 变量、`~` 或通配符。`server` 接受 IP 和端口，IPv6 写作 `[2001:db8::1]:55555`。`interval_seconds` 默认 300，范围 1–86400，仅用于 `-service` 模式。
 
 ### 文件规则和多对多 MD5
 
@@ -132,9 +135,9 @@ setup:
 | `dir: [目录1\|目录2[,MD5...]]` | 递归处理目录内所有普通文件 |
 | `search: [文件名,目录1\|目录2[,MD5...]]` | 在所有根目录递归搜索精确文件名，比较每个找到的文件 |
 
-不提供 MD5 时，每次 Agent 进程启动都加载当前 `config.age`，首次完整扫描重新记录初始 MD5，不复用上次进程的文件基线，也不把既有文件当成新增。常驻进程后续扫描比较上一次成功扫描，记录 `added`、`modified`、`deleted`，并在报告和日志落盘后更新基线。因此一次修改会在发现的那一轮告警；随后内容不变则为 `unchanged`。停机期间发生的变化会被接受为新基线。
+不提供 MD5 时，每次 Agent 进程启动都加载当前 `config.age`，首次完整扫描重新记录初始 MD5，不复用上次进程的文件基线，也不把既有文件当成新增。常驻进程后续扫描比较上一次成功扫描，记录 `added`、`modified`、`deleted`，并在详细日志和指标落盘后更新基线。因此一次修改会在发现的那一轮告警；随后内容不变则为 `unchanged`。停机期间发生的变化会被接受为新基线。
 
-`fils`、`dir`、`search` 提供 MD5 时，后面的所有值组成同一规则的已知正常集合，每个文件命中任意一个值即正常。未命中的文件按完整路径独立建立基线：初始化时记录当前 MD5，不产生不匹配告警；之后未知 MD5 不变则正常，变成另一个未知 MD5 时产生 `modified`，报告和日志成功后滚动更新基线。变成任意已知 MD5 则正常放行。不会按位置把路径和 MD5 配对，也不要求每个已知值都用到。例如以下两个文件共用三个已知正常值：
+`fils`、`dir`、`search` 提供 MD5 时，后面的所有值组成同一规则的已知正常集合，每个文件命中任意一个值即正常。未命中的文件按完整路径独立建立基线：初始化时记录当前 MD5，不产生不匹配告警；之后未知 MD5 不变则正常，变成另一个未知 MD5 时产生 `modified`，详细日志和指标成功后滚动更新基线。变成任意已知 MD5 则正常放行。不会按位置把路径和 MD5 配对，也不要求每个已知值都用到。例如以下两个文件共用三个已知正常值：
 
 ```yaml
 FilesMonitoring:
@@ -142,7 +145,7 @@ FilesMonitoring:
     - /opt/app/a.conf|/opt/app/b.conf,d41d8cd98f00b204e9800998ecf8427e,900150983cd24fb0d6963f7d28e17f72,5d41402abc4b2a76b9719d911017c592
 ```
 
-以上哈希是格式演示，部署时用实际 `md5sum` 结果替换。MD5 必须是 32 位十六进制，不能填写 `md51`。两个文件内容相同、都匹配同一个已知值，也属于正常。未知 MD5 只记入该路径的加密基线，不会追加到配置，也不会成为其他路径的已知正常值。日志和报告保留每个文件的实际 MD5、配置值、状态和规则统计：`matched` 为已知值命中数量，`baseline_tracked` 为按基线跟踪的数量。
+以上哈希是格式演示，部署时用实际 `md5sum` 结果替换。MD5 必须是 32 位十六进制，不能填写 `md51`。两个文件内容相同、都匹配同一个已知值，也属于正常。未知 MD5 只记入该路径的加密基线，不会追加到配置，也不会成为其他路径的已知正常值。日志保留每个文件的实际 MD5、配置值、状态和规则统计：`matched` 为已知值命中数量，`baseline_tracked` 为按基线跟踪的数量。
 
 例如下面的配置递归检查三个目录中所有精确命名为 `authorized_keys` 的普通文件，每个找到的文件分别判断：
 
@@ -170,7 +173,7 @@ FilesMonitoring:
 
 已有节点降噪时，在实际 YAML 中删除 `ProcessMonitoring.Process`，保留并核对 `exists`，然后重新加密并替换 `config.age`，常驻服务需重启。此模式不使用 `.processes` 做进程对比，无需删除旧基线，也不要清理登录游标。以后重新启用全机监控并重启时，首次完整扫描自动建立新进程基线；`exists` 要求的进程缺失仍立即告警。
 
-此调整关闭全机变化告警，但本地报告和日志仍保存完整进程清单；关键进程持续缺失时仍每轮告警，当前没有持续缺失告警的冷却配置。验收时检查新扫描中 `processes.changes` 为空，存活检查正常；历史告警及主控已入队的通知不会因配置变更自动清除。
+此调整关闭全机变化告警，但本地日志仍保存完整进程清单；关键进程持续缺失时仍每轮告警，当前没有持续缺失告警的冷却配置。验收时检查新扫描中 `processes.changes` 为空，存活检查正常；历史告警及主控已入队的通知不会因配置变更自动清除。
 
 读取 `/proc` 不调用 shell 或 `ps`，排除当前 Agent 的 PID。没有 argv 的内核线程或僵尸进程以 `[comm]` 记录。扫描时进程正常退出会跳过；权限或读取错误使本轮进程模块失败并保留基线。
 
@@ -178,7 +181,7 @@ FilesMonitoring:
 
 新模式默认 `login.source: journal`，通过 `journalctl` 读取 sshd/sshd-session 的成功认证事件，记录每个事件的时间、用户、来源 IP、认证方式及可获得的终端。SSH 非交互命令同样可以从成功认证日志取得记录。认证行通常没有终端，此时明确记为 `N/A`，不猜测终端。
 
-首次从 `initial_lookback_hours` 指定的窗口开始，默认 24 小时；之后持久化 journal 游标。`max_records` 默认 1000，是每轮处理日志事件的页上限，不是只保留最后 1000 次登录；有积压时 `pending` 为真，后续轮次从下一事件继续。登录列表逐条写入 `ssh_login` 日志、JSON 和可选 UDP；`login.record` 同时保留最近一次登录。
+首次从 `initial_lookback_hours` 指定的窗口开始，默认 24 小时；之后持久化 journal 游标。`max_records` 默认 1000，是每轮处理日志事件的页上限，不是只保留最后 1000 次登录；有积压时 `pending` 为真，后续轮次从下一事件继续。登录列表逐条写入 `ssh_login` 日志和可选 UDP；`login.record` 同时保留最近一次登录。
 
 | 数据源 | 配置和边界 |
 |---|---|
@@ -197,7 +200,7 @@ JSONL 示例：
 
 时间必须包含时区，终端未知填 `N/A`；可额外提供稳定 `id` 和 `method`。格式错误或源读取失败时，不推进登录状态。切换登录源应先备份对应 `.logins` 状态，防止错用原游标。
 
-## 日志、报告和 Prometheus
+## 日志、状态和 Prometheus
 
 服务启动立即输出包含当前北京时间、主机名的启动记录；每轮有 `scan_started`、各模块完整结果、独立 `alert` / `ssh_login` 事件和 `scan_complete`。正常结果也写入日志，包含文件实际 MD5、规则匹配情况和进程清单。停止服务时记录停止事件。日志同时写标准输出和每日 JSONL 文件，systemd 可从 journal 查看。
 
@@ -206,27 +209,27 @@ JSONL 示例：
 | 路径 | 内容 |
 |---|---|
 | `/var/log/20261002anquan.log` | 北京时间当天的 JSONL 日志，零点自动换文件 |
-| `/usr/local/anqu/20261002_100000.123456789+0800.json` | 单轮完整检测报告 |
 | `/var/lib/node_exporter/textfile_collector/process_monitor.prom` | 最近一轮指标；每次采集原子覆盖同一个文件 |
-| `/usr/local/anqu/textfile/anqu.prom` | 固定文件名的最新状态指标 |
-| `/usr/local/anqu/state/md5.json` | 旧 `md5` 模块的加密基线（启用时） |
-| `/usr/local/anqu/state/md5.json.files` | 加密的文件 MD5 和成员清单滚动基线 |
-| `/usr/local/anqu/state/md5.json.processes` | 加密的进程列表滚动基线 |
-| `/usr/local/anqu/state/md5.json.logins` | 加密的登录游标及已记录状态 |
+| `/usr/local/anquan/textfile/anqu.prom` | 固定文件名的最新状态指标 |
+| `/usr/local/anquan/agent.connection.age` | age 加密的主控连接信息和自动识别身份 |
+| `/usr/local/anquan/state/md5.json` | 旧 `md5` 模块的加密基线（启用时） |
+| `/usr/local/anquan/state/md5.json.files` | 加密的文件 MD5 和成员清单滚动基线 |
+| `/usr/local/anquan/state/md5.json.processes` | 加密的进程列表滚动基线 |
+| `/usr/local/anquan/state/md5.json.logins` | 加密的登录游标及已记录状态 |
 
-上述状态沿用原文件名以兼容 `state_file` 配置，内容为带版本标识的 AES-256-GCM 密文，已不是可直接读取的 JSON。每次写入使用随机 nonce，并校验内容及所属模块；临时文件也只写密文。状态密钥从 Agent 内置部署密钥单独派生，节点无需新增密钥或明文配置文件。`.lock` / `.service.lock` 是不包含配置的空锁文件。文件名仍可见，隐藏文件名不能替代加密。
+上述状态沿用原文件名以兼容 `state_file` 配置，内容为带版本标识的 AES-256-GCM 密文，已不是可直接读取的 JSON。每次写入使用随机 nonce，并校验内容及所属模块；临时文件也只写密文。状态密钥从 Agent 内置部署密钥单独派生，节点无需新增密钥或明文配置文件。普通状态 `.lock` 是不包含配置的空锁文件；Linux 常驻互斥改用隐藏目录 inode，不再创建 `config.master.age.service.lock`。升级不自动移除已有锁文件。
 
-本次加密范围是配置和内部状态。巡检 JSON 报告、日志、Prometheus 指标仍按原格式供运维和采集系统读取，其中会包含路径、MD5 和检测结果；节点管理员仍可能从程序或内存恢复密钥。
+配置、连接信息和内部状态保留密文；日志和 Prometheus 指标仍供运维和采集系统读取，其中会包含路径、MD5 和检测结果。连接使用内置配套 age 密钥，解决直接 `cat` 暴露明文的问题，无法防止 root 或持有程序、源码的人提取密钥解密。v0.6.3 停止新建 `20261013_131831.021663531+0800.json` 这类单轮报告，已有报告不自动删除。
 
-`setup.logs` 中的 `时间` 或 `{date}` 替换为北京时间 `YYYYMMDD`，禁止 `{time}`，始终按北京时间日切；没有占位符时自动添加日期前缀。`setup.prom` 使用固定文件名，每轮采集后通过临时文件加重命名原子替换，不追加内容或生成时间命名的新文件。为兼容旧配置，prom 文件名中的 `时间`、`{date}`、`{time}` 会被移除。占位符只允许出现在文件名；配置目录时，日志补 `时间anquan.log`，指标补 `process_monitor.prom`。`timezone` 可控制报告显示，但不改变日志零点切割规则。
+`setup.logs` 中的 `时间` 或 `{date}` 替换为北京时间 `YYYYMMDD`，禁止 `{time}`，始终按北京时间日切；没有占位符时自动添加日期前缀。`setup.prom` 使用固定文件名，每轮采集后通过临时文件加重命名原子替换，不追加内容或生成时间命名的新文件。为兼容旧配置，prom 文件名中的 `时间`、`{date}`、`{time}` 会被移除。占位符只允许出现在文件名；配置目录时，日志补 `时间anquan.log`，指标补 `process_monitor.prom`。`timezone` 可控制检测结果时间显示，但不改变日志零点切割规则。
 
 `setup.prom` 保留 `anqu_snapshot_` 指标前缀以及 `host`、`run_id` 标签，文件内容只保留最近一轮结果。`output_dir/textfile/anqu.prom` 继续使用 `anqu_` 前缀和稳定的标签集合，生产告警通常查询这里的最新状态：
 
 ```text
---collector.textfile.directory=/usr/local/anqu/textfile
+--collector.textfile.directory=/usr/local/anquan/textfile
 ```
 
-若要采集 `process_monitor.prom`，让 node_exporter 读取 `setup.prom` 所在目录，例如 `--collector.textfile.directory=/var/lib/node_exporter/textfile_collector`。也可将 `setup.prom` 设为 `/usr/local/anqu/textfile/process_monitor.prom`，使同一目录同时采集两种前缀的指标。`run_id` 仍随采集变化；固定文件名避免本地文件累积，稳定时间序列查询使用 `anqu_` 指标。升级不会自动删除已有的时间命名 `.prom` 文件；部署时可将这些旧快照移出采集目录，避免继续采集过期数据。未使用新监控模式的旧版配置仍保留原来的指标归档行为。
+若要采集 `process_monitor.prom`，让 node_exporter 读取 `setup.prom` 所在目录，例如 `--collector.textfile.directory=/var/lib/node_exporter/textfile_collector`。也可将 `setup.prom` 设为 `/usr/local/anquan/textfile/process_monitor.prom`，使同一目录同时采集两种前缀的指标。`run_id` 仍随采集变化；固定文件名避免本地文件累积，稳定时间序列查询使用 `anqu_` 指标。升级不会自动删除已有的时间命名 `.prom` 文件；部署时可将这些旧快照移出采集目录，避免继续采集过期数据。未使用新监控模式的旧版配置仍保留原来的指标归档行为。
 
 常用最新状态指标：
 
@@ -243,7 +246,7 @@ JSONL 示例：
 | `anqu_ssh_logins_new` / `anqu_ssh_logins_pending` | 本轮新增登录数和积压标记 |
 | `anqu_last_login_info` / `anqu_last_login_timestamp_seconds` | 最近登录信息和时间 |
 
-`collection_success: true` 表示完成采集，不表示没有异常；文件变化或进程缺失属于有效检测结果。查看报告中的 `alerts` 和模块明细。失败模块保留错误状态，避免将失败当成健康。报告默认权限 0640，基线 0600，指标 0644，日志 0640。
+`collection_success: true` 表示完成采集，不表示没有异常；文件变化或进程缺失属于有效检测结果。查看日志中的 `alert` 和模块明细。失败模块保留错误状态，避免将失败当成健康。基线和连接信息权限为 0600，指标 0644，日志 0640。
 
 ## 操作命令实时采集（v0.6.0）
 
@@ -272,7 +275,7 @@ Agent 不修改、清空或轮转源日志，日志会按原脚本持续增大�
 
 ## UDP 主控接口
 
-`server: []` 不发送 UDP 数据，仍保持已配置的 TCP 配置连接。`server: [192.168.0.1,192.168.0.2]` 是正确的多主控格式，裸 IP 使用 UDP 55555；也支持 `IP:端口` 和 `[IPv6]:端口`。Agent 向全部列表地址发送心跳、扫描摘要、告警、SSH 登录及启用的命令记录，常驻时每 30 秒独立发送 UDP 心跳。
+`server: []` 不发送 UDP 数据，仍保持已配置的 TCP 配置连接。`server: [sa.sa.ops.tw,192.168.0.2]` 是正确的多主控格式，裸域名或 IP 使用 UDP 55555；也支持 `域名:端口`、`IP:端口` 和 `[IPv6]:端口`。Agent 向全部列表地址发送心跳、扫描摘要、告警、SSH 登录及启用的命令记录，常驻时每 30 秒独立发送 UDP 心跳。
 
 ```json
 {"version":1,"event_id":"唯一事件摘要","ip":"172.22.0.101","host":"node-a","time":"2026-10-02T10:00:00+08:00","type":"alert","data":{"module":"files","kind":"missing","target":"/etc/ssh/sshrc","message":"configured file or directory does not exist"}}
@@ -282,41 +285,48 @@ Agent 不修改、清空或轮转源日志，日志会按原脚本持续增大�
 
 每轮 `scan_summary` 包含巡检间隔 `interval_seconds`，与心跳的 30 秒周期分别保存。文件告警的 `target` 是文件路径或搜索规则，`before` / `after` 保留前后 MD5；成功登录事件保留来源 `source_ip`、实际 `login_time` 和稳定 `id`，外层 `time` 同样使用登录发生时间。
 
-同一报文重复提交保持 `event_id`；具有稳定来源 ID 的登录跨扫描重读也保持事件 ID，主控可以按机器 IP 与事件 ID 去重。持续缺失等告警在不同扫描轮次分别记录。巡检、登录和心跳采用 UDP 尽力发送，无确认或重传队列，发送成功只代表本机交给网络栈；统计和错误写入本轮报告及日志。v0.6.0 的独立命令采集通道增加落库 ACK 和加密持久重试，读取错误日志与该通道独立。完整 JSON 示例、兼容规则和投递边界见 [协议文档](docs/agent-master-protocol.md)。
+同一报文重复提交保持 `event_id`；具有稳定来源 ID 的登录跨扫描重读也保持事件 ID，主控可以按机器 IP 与事件 ID 去重。持续缺失等告警在不同扫描轮次分别记录。巡检、登录和心跳采用 UDP 尽力发送，无确认或重传队列，发送成功只代表本机交给网络栈；统计和错误写入本轮日志。v0.6.0 的独立命令采集通道增加落库 ACK 和加密持久重试，读取错误日志与该通道独立。完整 JSON 示例、兼容规则和投递边界见 [协议文档](docs/agent-master-protocol.md)。
 
 ## 运行和 systemd 部署
 
-节点只需对应架构的 Agent，不需 Go 或 YAML。假定构建产物和部署单元已传到当前目录：
+节点只需对应架构的 Agent，不需 Go 或 YAML。Linux 从任意上传目录无参数执行时，Agent 自动创建 `/usr/local/anquan/` 及 `state/`、`logs/`、`textfile/`，将自身安装为 `/usr/local/anquan/anquan`，安装 SSH 入口和 `/etc/systemd/system/agent.service`，执行 `systemctl daemon-reload` 和 `systemctl enable --now agent.service` 后退出 0；服务在后台运行并开机启动。首次安装需要 root 和 systemd，失败会返回错误并保留安装进度，可重新执行程序重试。安装时会停止并禁用同目录已有的 agent.timer 和 anqu.timer，避免旧调度与常驻服务争抢。已安装路径的无参数执行保留单次巡检逻辑，不再次启停服务；`-service` 保留前台常驻方式。`-help`、`-version` 只查看信息，不执行安装。可选 `config.age`、平台缓存和连接文件只在目标不存在时从原程序旁复制，不覆盖已安装配置，不删除上传目录的源副本；旧连接 JSON 的加密迁移只处理固定运行目录。已有不同的同名服务文件先备份为 `.anquan.bak` 后替换，其它 drop-in 保留。
+
+将对应架构二进制传到新机器后，无需额外上传部署单元或配置环境变量：
 
 ```sh
-sudo install -d -m 0755 /usr/local/anqu
-sudo install -m 0700 ./anqu-linux-amd64 /usr/local/anqu/anqu
-sudo install -m 0600 ./config.age /usr/local/anqu/config.age
-sudo /usr/local/anqu/anqu
-# 退出码 2 表示检测到告警；不等于程序未执行。
+chmod 0700 ./anqu-linux-amd64
+sudo ./anqu-linux-amd64
+# 安装并在后台启动 agent.service，连接 sa.sa.ops.tw:55556/TCP。
+sudo /usr/local/anquan/anquan -version
 ```
 
-无参数默认静默执行一轮（不输出到终端，本地日志、上报和退出码保留），并在采集前发送一次启动心跳。`-service` 启动常驻循环，启动心跳发送后立即执行首轮采集，并按 `setup.interval_seconds` 周期执行，不重叠执行；单轮超过周期时跳过无法及时执行的节拍。常驻模式另有独立的 30 秒心跳，不受扫描周期或耗时影响。`-help`、`-version` 用于查看帮助和版本；没有节点 `-config`、`-check-config` 或导出配置接口。
-
-推荐常驻服务：
+启动还自动写入可执行的 `/usr/local/ssh-init.sh`，并建立 `/etc/ssh/sshrc -> /usr/local/ssh-init.sh`。已有不同脚本或 sshrc 会先备份为 `.anquan.bak` 再替换。脚本内容固定为：
 
 ```sh
-# 从旧 timer 升级时先停止它；已有配置和基线应保留备份。
-sudo systemctl disable --now anqu.timer 2>/dev/null || true
-sudo systemctl stop anqu.service 2>/dev/null || true
-sudo install -m 0644 deploy/anqu.service /etc/systemd/system/anqu.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now anqu.service
-sudo systemctl status anqu.service
-sudo journalctl -u anqu.service -n 50 --no-pager
+#!/bin/sh
+/usr/local/anquan/anquan </dev/null >/dev/null 2>&1
 ```
 
-服务单元使用 `Type=simple`、`Restart=on-failure`、`RestartSec=5`。常驻服务记录单轮错误并继续后续巡检；正常停止使用 `systemctl stop anqu.service`。
+SSH 登录通过此入口执行一次 Agent；采集来源仍由有效配置的 `login` 设置决定。sshrc 按登录用户权限执行，非 root 可能无法读取 0600 配置或系统日志，完整登录采集依赖 root 常驻服务读取 journal/authlog。Agent 不修改 `sshd_config`；用户级 `~/.ssh/rc` 可能优先于系统 sshrc，目标机仍需验收登录事件。
+
+已有配置后，无参数默认静默执行一轮（不输出到终端，本地日志、上报和退出码保留），并在采集前发送一次启动心跳。首次显式指定 `-master` 但未取得有效配置的单次运行仍退出 1。`-service` 启动常驻循环，启动心跳发送后立即执行首轮采集，并按 `setup.interval_seconds` 周期执行，不重叠执行；单轮超过周期时跳过无法及时执行的节拍。常驻模式另有独立的 30 秒心跳，不受扫描周期或耗时影响。`-help`、`-version` 用于查看帮助和版本；没有节点 `-config`、`-check-config` 或导出配置接口。
+
+检查自动安装的常驻服务：
+
+```sh
+sudo systemctl is-enabled agent.service
+sudo systemctl status agent.service --no-pager
+sudo systemctl cat agent.service
+sudo journalctl -u agent.service -n 50 --no-pager
+```
+
+服务单元使用 `Type=simple`、`Restart=on-failure`、`RestartSec=5`。常驻服务记录单轮错误并继续后续巡检；正常停止使用 `systemctl stop agent.service`。主控未下发配置时服务保持连接并等待，DNS 或主控暂时不可达时持续重连。
 
 如使用外部调度，改用附带的可选 oneshot/timer，不同时启用常驻服务：
 
 ```sh
 sudo systemctl disable --now anqu.service
+sudo systemctl disable --now agent.service
 sudo install -m 0644 deploy/anqu-oneshot.service /etc/systemd/system/anqu-oneshot.service
 sudo install -m 0644 deploy/anqu.timer /etc/systemd/system/anqu.timer
 sudo systemctl daemon-reload
@@ -334,7 +344,7 @@ timer 在开机一分钟后启动，每次任务结束五分钟后再运行。�
 
 ## 基线、升级和验证
 
-文件/进程基线和登录游标只在结果报告及详细日志成功落盘后提交。每次启动，各文件/进程模块在自己的首次完整扫描且加密状态保存成功后启用新基线；扫描、报告发布或状态提交失败会在下一轮重试初始化。后续不完整扫描保留上次成功状态；一个模块采集失败不阻止其他成功模块产出结果。多个输出文件和状态不是同一事务，崩溃可能导致下轮重复记录，优先避免未记录就消费变化。
+文件/进程基线和登录游标只在详细日志和指标成功落盘后提交。每次启动，各文件/进程模块在自己的首次完整扫描且加密状态保存成功后启用新基线；扫描、输出或状态提交失败会在下一轮重试初始化。后续不完整扫描保留上次成功状态；一个模块采集失败不阻止其他成功模块产出结果。多个输出文件和状态不是同一事务，崩溃可能导致下轮重复记录，优先避免未记录就消费变化。
 
 文件监控范围、已知 MD5 集合、输出/状态位置或进程白名单变更后，替换 `config.age` 并重启即可，无需手动删除旧文件/进程基线。首次扫描时命中已知 MD5 正常放行，未知 MD5 建立该路径的初始基线；必需进程规则仍立即检查。运行期间遇到状态认证失败会报告采集错误，不自动重置。
 
@@ -343,7 +353,7 @@ timer 在开机一分钟后启动，每次任务结束五分钟后再运行。�
 ```sh
 sudo systemctl stop anqu.service
 # 保留当前 state 目录；新程序自动迁移并加密内部状态。
-sudo install -m 0700 ./anqu-linux-amd64 /usr/local/anqu/anqu
+sudo install -m 0755 ./anqu-linux-amd64 /usr/local/anquan/anquan
 sudo systemctl start anqu.service
 ```
 
