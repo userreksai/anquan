@@ -96,7 +96,6 @@ func runWithWriter(c Config, writer io.Writer, startupHeartbeat bool) (r Report,
 	}
 	stamp := r.StartedAt.Format("20060102_150405.000000000-0700")
 	paths = OutputPaths{
-		JSON:   filepath.Join(c.OutputDir, stamp+".json"),
 		Prom:   filepath.Join(c.OutputDir, stamp+".prom"),
 		Latest: filepath.Join(c.OutputDir, "textfile", "anqu.prom"),
 		Log:    logPath(c, r.StartedAt),
@@ -110,7 +109,7 @@ func runWithWriter(c Config, writer io.Writer, startupHeartbeat bool) (r Report,
 	if err := writeReportLog(c, writer, r); err != nil {
 		return r, paths, err
 	}
-	// Commit only after the reports have been published. A crash before this point
+	// Commit only after metrics and detailed logs have been published. A crash before this point
 	// may repeat a change next time, but cannot silently consume an unreported change.
 	type commit struct {
 		module, path string
@@ -155,9 +154,6 @@ func runWithWriter(c Config, writer io.Writer, startupHeartbeat bool) (r Report,
 }
 
 func publish(r Report, paths OutputPaths, historical ...bool) error {
-	if err := writeJSON(paths.JSON, r, 0640); err != nil {
-		return fmt.Errorf("write report: %w", err)
-	}
 	b := metrics(r)
 	archive := b
 	if len(historical) > 0 && historical[0] {

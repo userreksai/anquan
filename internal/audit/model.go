@@ -79,6 +79,8 @@ type ExistenceResult struct {
 }
 
 type OutputPaths struct {
+	// JSON is retained for callers compiled against older releases. Per-scan
+	// JSON reports are no longer written, so this field is always empty.
 	JSON   string
 	Prom   string
 	Latest string

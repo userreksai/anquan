@@ -63,6 +63,10 @@ func TestMonitoringRunOverwritesPromAndPreservesLogsAndState(t *testing.T) {
 	if p1.Prom != c.Setup.Prom || p1.Prom != p2.Prom || p2.Prom != p3.Prom || p1.Log != p2.Log {
 		t.Fatal("scans must reuse the configured metrics file and same daily log")
 	}
+	reports, err := filepath.Glob(filepath.Join(c.OutputDir, "*.json"))
+	if err != nil || len(reports) != 0 || p1.JSON != "" || p2.JSON != "" || p3.JSON != "" {
+		t.Fatalf("monitoring scans created obsolete JSON reports: %v %v", reports, err)
+	}
 	entries, err := os.ReadDir(filepath.Dir(p3.Prom))
 	if err != nil || len(entries) != 1 || entries[0].Name() != "process_monitor.prom" {
 		t.Fatalf("collector must contain only process_monitor.prom: %v, %v", entries, err)

@@ -50,8 +50,13 @@ func TestAutomaticIPAppliesToAllUDPServersAndSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	plaintext, err := sealed.DecryptConfig(stored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clear(plaintext)
 	var metadata map[string]any
-	if err := json.Unmarshal(stored, &metadata); err != nil || metadata["observed_ip"] != "203.0.113.50" || metadata["agent_ip"] != nil {
+	if err := json.Unmarshal(plaintext, &metadata); err != nil || metadata["observed_ip"] != "203.0.113.50" || metadata["agent_ip"] != nil {
 		t.Fatal("discovered IP was not saved as runtime metadata")
 	}
 	restored, err := BootstrapConfig(Config{}, base, "")

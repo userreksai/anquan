@@ -5,11 +5,22 @@ package audit
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"syscall"
 	"unsafe"
 )
+
+func lockService(path string) (func(), error) {
+	dir := serviceLockDirectory(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, err
+	}
+	// Windows file locks retain automatic cleanup on forced termination.
+	// Linux locks the directory itself and never creates this development-only file.
+	return lockState(filepath.Join(dir, "owner"))
+}
 
 var (
 	lockKernel32     = syscall.NewLazyDLL("kernel32.dll")

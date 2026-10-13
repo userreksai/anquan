@@ -5,6 +5,7 @@ package audit
 import (
 	"fmt"
 	"os"
+	"sync"
 	"syscall"
 )
 
@@ -13,10 +14,31 @@ func lockState(path string) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
+	return lockLinuxFile(f, path)
+}
+
+// Lock a stable directory inode instead of creating a service lock file.
+// Keep the directory after release: unlinking it could let another process
+// lock a new inode while the original inode is still locked.
+func lockService(path string) (func(), error) {
+	dir := serviceLockDirectory(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, err
+	}
+	f, err := os.Open(dir)
+	if err != nil {
+		return nil, err
+	}
+	return lockLinuxFile(f, path)
+}
+
+func lockLinuxFile(f *os.File, path string) (func(), error) {
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("another run holds %s (or locking failed): %w", path, err)
 	}
-	// Leave the inode in place; unlinking it would permit two independent locks.
-	return func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); _ = f.Close() }, nil
+	var once sync.Once
+	return func() {
+		once.Do(func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN); _ = f.Close() })
+	}, nil
 }

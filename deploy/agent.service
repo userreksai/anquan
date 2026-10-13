@@ -1,0 +1,21 @@
+[Unit]
+Description=Anquan Agent Scan
+Wants=network-online.target
+After=local-fs.target network-online.target
+Conflicts=agent.timer anqu.service anqu-oneshot.service
+
+[Service]
+Type=simple
+User=root
+UMask=0022
+WorkingDirectory=/usr/local/anquan
+Environment=ANQUAN_MASTER=sa.sa.ops.tw
+ExecStart=/usr/local/anquan/anquan -service -master sa.sa.ops.tw
+Restart=on-failure
+RestartSec=5
+LimitCORE=0
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

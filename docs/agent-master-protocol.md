@@ -62,16 +62,16 @@ Master 收到首条有效心跳或检测事件时，按机器 IP 自动创建记
 
 ## TCP 配置下发（55556）
 
-Master 监听 `55556/tcp`。Agent 的配置主控地址来自 -master、ANQUAN_MASTER 或自动保存的连接信息，完全独立于 YAML 的 server。裸配置主控 IP 默认使用 TCP 55556，可用 IP:TCP端口调整。YAML 的 server 仅向全部地址发送 UDP 数据，裸 IP 默认使用 UDP 55555；server: [] 只关闭 UDP，不影响接收配置。
+Master 监听 `55556/tcp`。v0.6.4 新机器自动安装的 `agent.service` 固定连接 `sa.sa.ops.tw:55556`。前台/单次模式的地址来自 -master、ANQUAN_MASTER 或自动保存的连接信息，无本地配置且无连接地址时使用固定域名兜底，完全独立于 YAML 的 server。裸域名或 IP 默认使用 TCP 55556，可用 host:TCP端口调整。YAML 的 server 仅向全部地址发送 UDP 数据，也支持域名，裸域名或 IP 默认使用 UDP 55555；server: [] 只关闭 UDP，不影响接收配置。域名不在配置校验阶段解析，保存主机名供每次连接/发送时解析；填写 DNS 主机名，不接受 URL 或路径。
 
-v0.6.1 不要求本地 `config.age`：首次指定 Master 后自动保存 `agent.connection.json` 供后续无参数运行使用。无有效平台缓存或本地配置时，`-service` 只连接、注册并保持 TCP 心跳，等待下发，不开启巡检/登录/命令采集；Master 离线时持续重连。收到有效配置并完成运行环境检查和密文缓存后才启用采集并 ACK。主控明确取消分配时，无本地配置的 Agent 恢复等待，配置通道继续运行。
+不要求本地 `config.age`：Agent 自动保存连接信息供后续无参数运行使用。连接文件为 `/usr/local/anquan/agent.connection.age`，通过内置配套 age 密钥加密主控地址和自动识别身份；旧 `agent.connection.json` 成功迁移后删除。默认域名编译进程序，主控 IP 由 DNS 决定；前台运行保留参数或环境变量设置地址的能力。内置密钥无法防 root 或逆向提取。无有效平台缓存或本地配置时，`-service` 只连接、注册并保持 TCP 心跳，等待下发，不开启巡检/登录/命令采集；DNS 或 Master 离线时持续重连。收到有效配置并完成运行环境检查和密文缓存后才启用采集并 ACK。主控明确取消分配时，无本地配置的 Agent 恢复等待，配置通道继续运行。
 
-无参数仍执行一次：已有平台缓存时可以离线采集并上报 SSH 登录；可达 Master 时先限时同步配置，随后执行一次并退出。首次既没有地址也没有配置时提示指定 Master；限时同步后仍未获得配置时退出 1。SSH 登录按有效配置的 enabled/source/回看范围采集，沿用持久游标，不因重新执行而重复上报已读记录。
+Linux 新机器从上传目录无参数执行会完成安装并启动后台服务后退出。已安装路径无参数仍执行一次：已有平台缓存时可以离线采集并上报 SSH 登录；可达 Master 时先限时同步配置，随后执行一次并退出。无本地配置和保存地址时连接默认域名；限时同步后仍未获得配置时退出 1。SSH 登录按有效配置的 enabled/source/回看范围采集，沿用持久游标，不因重新执行而重复上报已读记录。
 
 每帧是 UTF-8 JSON 加换行（NDJSON），最大 8 MiB，`version: 1`。JSON 字符串内的 age 密文换行使用 JSON 转义。第一帧：
 
 ```json
-{"version":1,"type":"hello","discover_ip":true,"host":"node-a","agent_version":"0.6.2"}
+{"version":1,"type":"hello","discover_ip":true,"host":"node-a","agent_version":"0.6.4"}
 ```
 
 主控按 TCP 实际来源 IP 登记机器，先回复身份，再发送最新分配：
