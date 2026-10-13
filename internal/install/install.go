@@ -29,6 +29,59 @@ type Preparation struct {
 	InstallOnly bool
 }
 
+// clearUploadedDirectory makes room when the running upload itself occupies the
+// required installation directory, for example /usr/local/anquan. Preserve it
+// under a unique name beside the directory so settings beside the upload keep
+// resolving from the same parent. Never move unrelated files or symbolic links.
+func clearUploadedDirectory(source, directory string, euid int) (string, string, error) {
+	info, err := os.Lstat(directory)
+	if os.IsNotExist(err) {
+		return source, "", nil
+	}
+	if err != nil {
+		return "", "", fmt.Errorf("inspect installation directory: %w", err)
+	}
+	if info.IsDir() {
+		return source, "", nil
+	}
+	if !info.Mode().IsRegular() {
+		return "", "", fmt.Errorf("installation directory must be a real directory: %s", directory)
+	}
+	sourceInfo, err := os.Lstat(source)
+	if err != nil || !sourceInfo.Mode().IsRegular() || !os.SameFile(info, sourceInfo) {
+		return "", "", fmt.Errorf("installation directory is occupied by another file: %s; preserve it manually, for example with mv -i -- %q %q, then run the uploaded agent again", directory, directory, directory+".upload")
+	}
+	if euid != 0 {
+		return "", "", fmt.Errorf("first deployment requires root to relocate uploaded agent from %s", directory)
+	}
+	// CreateTemp reserves the backup name exclusively, including when an older
+	// upload backup exists. Rename only replaces our own empty reservation.
+	stage, err := os.CreateTemp(filepath.Dir(directory), filepath.Base(directory)+".upload-*")
+	if err != nil {
+		return "", "", fmt.Errorf("reserve uploaded agent backup: %w", err)
+	}
+	backup := stage.Name()
+	if err := stage.Close(); err != nil {
+		_ = os.Remove(backup)
+		return "", "", fmt.Errorf("close uploaded agent backup reservation: %w", err)
+	}
+	current, err := os.Lstat(directory)
+	if err != nil || !current.Mode().IsRegular() || !os.SameFile(info, current) {
+		_ = os.Remove(backup)
+		return "", "", fmt.Errorf("uploaded agent changed before relocation: %s", directory)
+	}
+	if err := os.Rename(directory, backup); err != nil {
+		_ = os.Remove(backup)
+		return "", "", fmt.Errorf("preserve uploaded agent before creating installation directory: %w", err)
+	}
+	if filepath.Clean(source) == filepath.Clean(directory) {
+		return backup, backup, nil
+	}
+	// A different path to the same inode is a hard link. It still exists after
+	// the directory occupant moves, and retains its original settings location.
+	return source, backup, nil
+}
+
 // ensure is idempotent, and stages replacements on the destination filesystem.
 // Existing settings take precedence over settings beside a newly uploaded binary.
 func ensure(source string, paths layout) (relocated bool, err error) {

@@ -71,7 +71,7 @@ Linux 新机器从上传目录无参数执行会完成安装并启动后台服�
 每帧是 UTF-8 JSON 加换行（NDJSON），最大 8 MiB，`version: 1`。JSON 字符串内的 age 密文换行使用 JSON 转义。第一帧：
 
 ```json
-{"version":1,"type":"hello","discover_ip":true,"host":"node-a","agent_version":"0.6.4"}
+{"version":1,"type":"hello","discover_ip":true,"host":"node-a","agent_version":"0.6.5"}
 ```
 
 主控按 TCP 实际来源 IP 登记机器，先回复身份，再发送最新分配：

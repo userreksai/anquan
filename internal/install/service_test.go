@@ -100,6 +100,72 @@ func TestFirstLaunchAlreadyAtFixedPathInstallsService(t *testing.T) {
 	}
 }
 
+func TestUploadOccupyingDirectoryInstallsAndStartsService(t *testing.T) {
+	requireSymlinks(t)
+	_, paths := fixture(t)
+	put(t, paths.directory, "uploaded agent")
+	put(t, filepath.Join(filepath.Dir(paths.directory), "config.age"), "optional upload configuration")
+	var commands [][]string
+	var output bytes.Buffer
+	prepared, err := prepare(paths.directory, nil, &output, paths, testOperations(t, &commands))
+	if err != nil || !prepared.InstallOnly || prepared.Path != paths.executable {
+		t.Fatalf("directory-conflict preparation %+v, error %v", prepared, err)
+	}
+	if want := [][]string{{"daemon-reload"}, {"enable", "--now", ServiceName}}; !reflect.DeepEqual(commands, want) {
+		t.Fatalf("systemctl commands %v; want %v", commands, want)
+	}
+	backups, err := filepath.Glob(paths.directory + ".upload-*")
+	if err != nil || len(backups) != 1 || !strings.Contains(output.String(), backups[0]) {
+		t.Fatalf("backup path not reported: backups %v, output %q, error %v", backups, output.String(), err)
+	}
+	wantFile(t, backups[0], "uploaded agent")
+	wantFile(t, paths.executable, "uploaded agent")
+	wantFile(t, filepath.Join(paths.directory, "config.age"), "optional upload configuration")
+	wantFile(t, paths.service, string(serviceUnit(paths.executable)))
+	wantFile(t, paths.script, hook)
+	if target, err := os.Readlink(paths.sshrc); err != nil || target != paths.script {
+		t.Fatalf("SSH link target %q, error %v", target, err)
+	}
+	for _, name := range []string{"state", "logs", "textfile"} {
+		info, err := os.Stat(filepath.Join(paths.directory, name))
+		if err != nil || !info.IsDir() {
+			t.Fatalf("missing runtime directory %s: %v", name, err)
+		}
+	}
+	commands = nil
+	ops := testOperations(t, &commands)
+	ops.euid = func() int { return 1000 }
+	prepared, err = prepare(paths.executable, nil, nil, paths, ops)
+	if err != nil || prepared.InstallOnly || len(commands) != 0 {
+		t.Fatalf("installed no-argument launch no longer a one-shot check: %+v, commands %v, error %v", prepared, commands, err)
+	}
+}
+
+func TestExplicitServiceFromDirectoryOccupantExecutesInstalledBinary(t *testing.T) {
+	requireSymlinks(t)
+	_, paths := fixture(t)
+	put(t, paths.directory, "uploaded agent")
+	var commands [][]string
+	ops := testOperations(t, &commands)
+	var started []string
+	ops.exec = func(path string, argv, _ []string) error {
+		if path != paths.executable {
+			t.Fatalf("wrong executable %q", path)
+		}
+		started = append([]string(nil), argv...)
+		return nil
+	}
+	args := []string{"-service", "-master", defaults.MasterAddress}
+	prepared, err := prepare(paths.directory, args, nil, paths, ops)
+	if err != nil || prepared.InstallOnly || prepared.Path != paths.executable || len(commands) != 0 {
+		t.Fatalf("explicit directory-conflict preparation %+v, commands %v, error %v", prepared, commands, err)
+	}
+	if want := append([]string{paths.executable}, args...); !reflect.DeepEqual(started, want) {
+		t.Fatalf("foreground args %v; want %v", started, want)
+	}
+	wantFile(t, paths.executable, "uploaded agent")
+}
+
 func TestServiceInstallationPreservesLegacyUnitAndDropIns(t *testing.T) {
 	_, paths := fixture(t)
 	put(t, paths.service, "legacy service configuration\n")

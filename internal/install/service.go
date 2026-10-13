@@ -20,12 +20,32 @@ const serviceInstalling = ".agent-service-installing"
 
 // prepare installs on Linux. Its operations are injected so tests never invoke
 // the host's service manager or replace the testing process.
-func prepare(path string, args []string, writer io.Writer, paths layout, ops runtimeOperations) (Preparation, error) {
+func prepare(path string, args []string, writer io.Writer, paths layout, ops runtimeOperations) (prepared Preparation, err error) {
 	_, serviceErr := os.Lstat(paths.service)
 	if serviceErr != nil && !os.IsNotExist(serviceErr) {
 		return Preparation{}, fmt.Errorf("inspect systemd service: %w", serviceErr)
 	}
 	serviceExists := serviceErr == nil
+	installedSource := filepath.Clean(path) == filepath.Clean(paths.executable)
+	// Check privileges before relocating an upload or inspecting a child of the
+	// installation directory: the upload itself may currently occupy that path.
+	if len(args) == 0 && (!installedSource || !serviceExists) && ops.euid() != 0 {
+		return Preparation{}, fmt.Errorf("first deployment requires root to install and start %s", ServiceName)
+	}
+	source, backup, err := clearUploadedDirectory(path, paths.directory, ops.euid())
+	if err != nil {
+		return Preparation{}, err
+	}
+	if backup != "" {
+		defer func() {
+			if err != nil {
+				err = fmt.Errorf("%w; uploaded agent preserved at %s; run %s to retry installation", err, backup, source)
+			}
+		}()
+		if writer != nil {
+			fmt.Fprintf(writer, "Preserved uploaded agent at %s before creating %s.\n", backup, paths.directory)
+		}
+	}
 	pending := false
 	if len(args) == 0 {
 		var err error
@@ -36,11 +56,11 @@ func prepare(path string, args []string, writer io.Writer, paths layout, ops run
 	}
 	// An installed no-argument invocation is still a one-shot SSH check. A
 	// service invocation never tries to activate another systemd process.
-	newDeployment := len(args) == 0 && (filepath.Clean(path) != filepath.Clean(paths.executable) || !serviceExists || pending)
+	newDeployment := len(args) == 0 && (!installedSource || !serviceExists || pending)
 	if newDeployment && ops.euid() != 0 {
 		return Preparation{}, fmt.Errorf("first deployment requires root to install and start %s", ServiceName)
 	}
-	relocated, err := ensure(path, paths)
+	relocated, err := ensure(source, paths)
 	if err != nil {
 		return Preparation{}, err
 	}
@@ -56,7 +76,7 @@ func prepare(path string, args []string, writer io.Writer, paths layout, ops run
 	if relocated && writer != nil {
 		fmt.Fprintf(writer, "Installed %s; SSH login hook ready.\n", paths.executable)
 	}
-	if filepath.Clean(path) != filepath.Clean(paths.executable) {
+	if !installedSource {
 		if err := ops.exec(paths.executable, append([]string{paths.executable}, args...), os.Environ()); err != nil {
 			return Preparation{}, fmt.Errorf("start installed agent: %w", err)
 		}
