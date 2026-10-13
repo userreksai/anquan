@@ -1,4 +1,4 @@
-# Anqu 安全检测 Agent（v0.6.4）
+# Anqu 安全检测 Agent（v0.6.5）
 
 Anqu 在 Linux 节点持续检查文件 MD5、文件增删和进程变化，并逐条记录成功的 SSH 登录。服务启动时记录当前时间，每轮将当前主机的完整检测结果和告警写入日志，并更新固定路径的 Prometheus 文件。运行日志按北京时间零点切换文件，不再生成时间戳命名的单轮 JSON 报告。
 
@@ -292,6 +292,8 @@ Agent 不修改、清空或轮转源日志，日志会按原脚本持续增大�
 节点只需对应架构的 Agent，不需 Go 或 YAML。Linux 从任意上传目录无参数执行时，Agent 自动创建 `/usr/local/anquan/` 及 `state/`、`logs/`、`textfile/`，将自身安装为 `/usr/local/anquan/anquan`，安装 SSH 入口和 `/etc/systemd/system/agent.service`，执行 `systemctl daemon-reload` 和 `systemctl enable --now agent.service` 后退出 0；服务在后台运行并开机启动。首次安装需要 root 和 systemd，失败会返回错误并保留安装进度，可重新执行程序重试。安装时会停止并禁用同目录已有的 agent.timer 和 anqu.timer，避免旧调度与常驻服务争抢。已安装路径的无参数执行保留单次巡检逻辑，不再次启停服务；`-service` 保留前台常驻方式。`-help`、`-version` 只查看信息，不执行安装。可选 `config.age`、平台缓存和连接文件只在目标不存在时从原程序旁复制，不覆盖已安装配置，不删除上传目录的源副本；旧连接 JSON 的加密迁移只处理固定运行目录。已有不同的同名服务文件先备份为 `.anquan.bak` 后替换，其它 drop-in 保留。
 
 将对应架构二进制传到新机器后，无需额外上传部署单元或配置环境变量：
+
+v0.6.5 支持直接将上传文件命名为 `/usr/local/anquan` 并执行：当这个路径是当前运行的普通程序文件时，安装器先将它保留到同父目录的唯一 `anquan.upload-*` 备份，再创建 `/usr/local/anquan/` 并安装为 `/usr/local/anquan/anquan`。输出会显示备份路径，后续安装失败仍可用该备份重试。安装目录被其它文件或符号链接占用时会明确报错并保留原对象。
 
 ```sh
 chmod 0700 ./anqu-linux-amd64

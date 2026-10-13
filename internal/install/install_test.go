@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -185,5 +186,217 @@ func TestRefuseSSHDirectoriesAndSymlinkedInstallationDirectory(t *testing.T) {
 	}
 	if err := ensureDirectory(link); err == nil {
 		t.Fatal("symlink accepted as installation directory")
+	}
+}
+
+func TestUploadedExecutableCanMakeRoomForInstallationDirectory(t *testing.T) {
+	_, paths := fixture(t)
+	source := paths.directory
+	put(t, source, "uploaded agent")
+	original, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Windows loads the file identity lazily from its old name. Capture that
+	// identity before the rename so the comparison remains valid afterward.
+	if !os.SameFile(original, original) {
+		t.Fatal("cannot capture uploaded executable identity")
+	}
+	put(t, source+".upload-existing", "older upload backup")
+	settings := []string{"config.age", "config.master.age", "agent.connection.age", "agent.connection.json"}
+	for _, name := range settings {
+		put(t, filepath.Join(filepath.Dir(source), name), "uploaded "+name)
+	}
+	relocated, backup, err := clearUploadedDirectory(source, paths.directory, 0)
+	if err != nil || backup == "" || relocated != backup || filepath.Dir(relocated) != filepath.Dir(source) {
+		t.Fatalf("relocation source %q, backup %q, error %v", relocated, backup, err)
+	}
+	if _, err := os.Lstat(source); !os.IsNotExist(err) {
+		t.Fatalf("installation directory path still occupied: %v", err)
+	}
+	info, err := os.Stat(backup)
+	if err != nil || !os.SameFile(original, info) {
+		t.Fatalf("original executable not preserved as backup: %v", err)
+	}
+	if err := ensureDirectory(paths.directory); err != nil {
+		t.Fatal(err)
+	}
+	if installed, err := installExecutable(relocated, paths.executable); err != nil || !installed {
+		t.Fatalf("install relocated upload: %t, %v", installed, err)
+	}
+	for _, name := range settings {
+		if err := copyOptional(filepath.Join(filepath.Dir(relocated), name), filepath.Join(paths.directory, name)); err != nil {
+			t.Fatal(err)
+		}
+		wantFile(t, filepath.Join(paths.directory, name), "uploaded "+name)
+	}
+	wantFile(t, paths.executable, "uploaded agent")
+	wantFile(t, backup, "uploaded agent")
+	wantFile(t, source+".upload-existing", "older upload backup")
+}
+
+func TestUploadedDirectoryRelocationRequiresRootAndPreservesUnrelatedFiles(t *testing.T) {
+	for _, args := range [][]string{nil, {"-service"}} {
+		t.Run(fmtArgs(args), func(t *testing.T) {
+			_, paths := fixture(t)
+			put(t, paths.directory, "uploaded agent")
+			var commands [][]string
+			ops := testOperations(t, &commands)
+			ops.euid = func() int { return 1000 }
+			if _, err := prepare(paths.directory, args, nil, paths, ops); err == nil || !strings.Contains(err.Error(), "requires root") {
+				t.Fatalf("non-root relocation: %v", err)
+			}
+			wantFile(t, paths.directory, "uploaded agent")
+			if backups, err := filepath.Glob(paths.directory + ".upload-*"); err != nil || len(backups) != 0 {
+				t.Fatalf("non-root created backup reservations: %v, %v", backups, err)
+			}
+			if len(commands) != 0 {
+				t.Fatalf("non-root called systemctl: %v", commands)
+			}
+		})
+	}
+	source, paths := fixture(t)
+	put(t, source, "uploaded agent")
+	put(t, paths.directory, "unrelated occupant")
+	var commands [][]string
+	if _, err := prepare(source, nil, nil, paths, testOperations(t, &commands)); err == nil || !strings.Contains(err.Error(), "another file") || !strings.Contains(err.Error(), "mv -i") {
+		t.Fatalf("unrelated file conflict: %v", err)
+	}
+	wantFile(t, source, "uploaded agent")
+	wantFile(t, paths.directory, "unrelated occupant")
+	if backups, err := filepath.Glob(paths.directory + ".upload-*"); err != nil || len(backups) != 0 {
+		t.Fatalf("unrelated file moved or backup reserved: %v, %v", backups, err)
+	}
+	if len(commands) != 0 {
+		t.Fatalf("conflict called systemctl: %v", commands)
+	}
+}
+
+func fmtArgs(args []string) string {
+	if len(args) == 0 {
+		return "no_arguments"
+	}
+	return strings.Join(args, "_")
+}
+
+func TestExistingInstallationDirectoryIsUntouched(t *testing.T) {
+	source, paths := fixture(t)
+	put(t, source, "uploaded agent")
+	put(t, filepath.Join(paths.directory, "config.age"), "installed configuration")
+	relocated, backup, err := clearUploadedDirectory(source, paths.directory, 1000)
+	if err != nil || relocated != source || backup != "" {
+		t.Fatalf("existing directory: source %q backup %q error %v", relocated, backup, err)
+	}
+	wantFile(t, source, "uploaded agent")
+	wantFile(t, filepath.Join(paths.directory, "config.age"), "installed configuration")
+}
+
+func TestHardLinkedUploadRetainsOriginalConfigurationDirectory(t *testing.T) {
+	source, paths := fixture(t)
+	put(t, source, "uploaded agent")
+	if err := os.MkdirAll(filepath.Dir(paths.directory), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(source, paths.directory); err != nil {
+		t.Skipf("host does not permit hard links: %v", err)
+	}
+	put(t, filepath.Join(filepath.Dir(source), "config.age"), "upload directory settings")
+	put(t, filepath.Join(filepath.Dir(paths.directory), "config.age"), "different parent settings")
+	relocated, backup, err := clearUploadedDirectory(source, paths.directory, 0)
+	if err != nil || relocated != source || backup == "" {
+		t.Fatalf("hard link relocation: source %q backup %q error %v", relocated, backup, err)
+	}
+	if err := ensureDirectory(paths.directory); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := installExecutable(relocated, paths.executable); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyOptional(filepath.Join(filepath.Dir(relocated), "config.age"), filepath.Join(paths.directory, "config.age")); err != nil {
+		t.Fatal(err)
+	}
+	wantFile(t, filepath.Join(paths.directory, "config.age"), "upload directory settings")
+	wantFile(t, source, "uploaded agent")
+	wantFile(t, backup, "uploaded agent")
+}
+
+func TestSymlinkedUploadOrInstallationDirectoryIsNeverRelocated(t *testing.T) {
+	requireSymlinks(t)
+	for _, linkDirectory := range []bool{false, true} {
+		source, paths := fixture(t)
+		if linkDirectory {
+			put(t, source, "uploaded agent")
+			if err := os.MkdirAll(filepath.Dir(paths.directory), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(source, paths.directory); err != nil {
+				t.Fatal(err)
+			}
+		} else {
+			put(t, paths.directory, "uploaded agent")
+			if err := os.MkdirAll(filepath.Dir(source), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(paths.directory, source); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, _, err := clearUploadedDirectory(source, paths.directory, 0); err == nil {
+			t.Fatal("symbolic link accepted for relocation")
+		}
+		wantFile(t, source, "uploaded agent")
+		wantFile(t, paths.directory, "uploaded agent")
+	}
+}
+
+func TestInstallationFailureReportsPreservedUploadForRetry(t *testing.T) {
+	_, paths := fixture(t)
+	put(t, paths.directory, "uploaded agent")
+	if err := os.MkdirAll(paths.script, 0755); err != nil {
+		t.Fatal(err)
+	}
+	var commands [][]string
+	_, err := prepare(paths.directory, nil, nil, paths, testOperations(t, &commands))
+	backups, globErr := filepath.Glob(paths.directory + ".upload-*")
+	if globErr != nil || len(backups) != 1 {
+		t.Fatalf("missing retained upload backup: %v, %v", backups, globErr)
+	}
+	if err == nil || !strings.Contains(err.Error(), backups[0]) || !strings.Contains(err.Error(), "retry installation") {
+		t.Fatalf("backup retry path missing from installation error: %v", err)
+	}
+	wantFile(t, backups[0], "uploaded agent")
+	wantFile(t, paths.executable, "uploaded agent")
+	if len(commands) != 0 {
+		t.Fatalf("failed file installation called systemctl: %v", commands)
+	}
+}
+
+func TestHardLinkedUploadFailureRetriesOriginalConfigurationLocation(t *testing.T) {
+	source, paths := fixture(t)
+	put(t, source, "uploaded agent")
+	if err := os.MkdirAll(filepath.Dir(paths.directory), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(source, paths.directory); err != nil {
+		t.Skipf("host does not permit hard links: %v", err)
+	}
+	put(t, filepath.Join(filepath.Dir(source), "config.age"), "original upload settings")
+	if err := os.MkdirAll(paths.script, 0755); err != nil {
+		t.Fatal(err)
+	}
+	var commands [][]string
+	_, err := prepare(source, nil, nil, paths, testOperations(t, &commands))
+	backups, globErr := filepath.Glob(paths.directory + ".upload-*")
+	if globErr != nil || len(backups) != 1 {
+		t.Fatalf("missing retained hard-linked upload: %v, %v", backups, globErr)
+	}
+	if err == nil || !strings.Contains(err.Error(), "preserved at "+backups[0]) || !strings.Contains(err.Error(), "run "+source+" to retry") {
+		t.Fatalf("retry lost original upload configuration location: %v", err)
+	}
+	wantFile(t, source, "uploaded agent")
+	wantFile(t, backups[0], "uploaded agent")
+	wantFile(t, filepath.Join(paths.directory, "config.age"), "original upload settings")
+	if len(commands) != 0 {
+		t.Fatalf("failed installation called systemctl: %v", commands)
 	}
 }
