@@ -76,7 +76,8 @@ server: []
 # server:
 #   - sa.sa.ops.tw:55555
 # 支持裸域名、IP 或显式端口；多台默认端口示例：server: [sa.sa.ops.tw,192.168.0.2]
-# Agent 与配置主控握手后自动取得实际来源 IP，跨公网 NAT 直连时为公网出口 IP。
+# Agent 从到配置主控的 TCP 路由自动取得本机网卡 IP，中转/NAT 来源单独保存在主控。
+# TCP 未连接时共享首个可用 UDP 路由地址；无需填写机器 IP，也不查询公网 IP 服务。
 
 setup:
   logs: /var/log/时间anquan.log

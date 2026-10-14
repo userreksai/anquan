@@ -25,6 +25,7 @@ type configFrame struct {
 	Version      int    `json:"version"`
 	Type         string `json:"type"`
 	IP           string `json:"ip,omitempty"`
+	ReportedIP   string `json:"reported_ip,omitempty"`
 	Host         string `json:"host,omitempty"`
 	AgentVersion string `json:"agent_version,omitempty"`
 	DiscoverIP   bool   `json:"discover_ip,omitempty"`
@@ -44,7 +45,7 @@ type configUpdate struct {
 }
 
 // ConfigDelivery uses deployment TCP addresses independently of YAML's UDP
-// destinations, and discovers machine identity from the connected master.
+// destinations, and identifies the local interface used to reach the master.
 // The first reachable master owns the connection until it disconnects.
 type ConfigDelivery struct {
 	bootstrap Config
@@ -215,6 +216,23 @@ func (d *ConfigDelivery) observeIP(address string) error {
 	if d.bootstrap.identity == nil {
 		return errors.New("agent identity was not initialized")
 	}
+	d.bootstrap.identity.localIP.Store(nil)
+	d.bootstrap.identity.ip.Store(&value)
+	return nil
+}
+
+func (d *ConfigDelivery) selectLocalIP(address string) error {
+	value := usableLocalIP(net.ParseIP(address))
+	if value == "" {
+		return errors.New("agent socket has no usable local IP")
+	}
+	if d.bootstrap.identity == nil {
+		return errors.New("agent identity was not initialized")
+	}
+	if err := d.persistLocalConnection(value); err != nil {
+		return err
+	}
+	d.bootstrap.identity.localIP.Store(&value)
 	d.bootstrap.identity.ip.Store(&value)
 	return nil
 }
@@ -241,7 +259,17 @@ func (d *ConfigDelivery) connection(ctx context.Context, conn net.Conn, endpoint
 	if err != nil {
 		return errors.New("cannot determine agent hostname")
 	}
-	if err := write(configFrame{Version: 1, Type: "hello", DiscoverIP: true, Host: host, AgentVersion: d.version}); err != nil {
+	selectedIP := localSocketIP(conn.LocalAddr())
+	hello := configFrame{Version: 1, Type: "hello", DiscoverIP: true, Host: host, AgentVersion: d.version}
+	if selectedIP != "" {
+		if err := d.selectLocalIP(selectedIP); err != nil {
+			return err
+		}
+		// Legacy masters already accept explicit hello.ip when discovery is
+		// disabled. reported_ip allows new masters to acknowledge local mode.
+		hello.IP, hello.ReportedIP, hello.DiscoverIP = selectedIP, selectedIP, false
+	}
+	if err := write(hello); err != nil {
 		return err
 	}
 	pingDone := make(chan struct{})
@@ -283,6 +311,12 @@ func (d *ConfigDelivery) connection(ctx context.Context, conn net.Conn, endpoint
 		}
 		switch frame.Type {
 		case "identity":
+			if selectedIP != "" {
+				if ip := net.ParseIP(frame.IP); ip == nil || ip.String() != selectedIP {
+					return errors.New("master returned an identity different from the selected local IP")
+				}
+				continue
+			}
 			if err := d.observeIP(frame.IP); err != nil {
 				return err
 			}

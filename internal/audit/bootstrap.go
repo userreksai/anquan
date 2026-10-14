@@ -30,6 +30,7 @@ var connectionSettingsMu sync.Mutex
 type connectionSettings struct {
 	Version    int      `json:"version"`
 	Master     []string `json:"master,omitempty"`
+	LocalIP    string   `json:"local_ip,omitempty"`
 	ObservedIP string   `json:"observed_ip,omitempty"`
 	Server     []string `json:"server,omitempty"`   // v1 migration only
 	AgentIP    string   `json:"agent_ip,omitempty"` // ignored v1 manual identity
@@ -59,10 +60,9 @@ func BootstrapConfig(local Config, baseDir, master string) (Config, error) {
 	}
 	c.AgentIP = ""
 	c.identity = &agentIdentity{}
-	if ip := net.ParseIP(stored.ObservedIP); ip != nil && !ip.IsUnspecified() && !ip.IsMulticast() {
-		value := ip.String()
-		c.identity.ip.Store(&value)
-	}
+	// Observed peer addresses may belong to a relay. Only a retained local IP
+	// still assigned to this machine is allowed to seed the reporting identity.
+	restoreLocalIdentity(c.identity, stored)
 	c.masters = append([]string(nil), stored.Master...)
 	if strings.TrimSpace(master) != "" {
 		c.masters = strings.Split(master, ",")
@@ -89,7 +89,7 @@ func loadConnectionSettings(baseDir string) (connectionSettings, error) {
 	if err != nil {
 		return connectionSettings{}, err
 	}
-	if !legacy {
+	if !legacy && (settings.Version == 0 || settings.Version == 3) {
 		return settings, removeLegacyConnectionSettings(baseDir)
 	}
 	unlock, err := lockConnectionSettings(baseDir)
@@ -103,8 +103,9 @@ func loadConnectionSettings(baseDir string) (connectionSettings, error) {
 	if err != nil {
 		return connectionSettings{}, err
 	}
-	if legacy {
+	if legacy || (settings.Version != 0 && settings.Version != 3) {
 		err = writeConnectionSettings(baseDir, settings)
+		settings.Version = 3
 	} else {
 		err = removeLegacyConnectionSettings(baseDir)
 	}
@@ -173,7 +174,7 @@ func decodeConnectionSettings(data []byte) (connectionSettings, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var settings connectionSettings
-	if err := decoder.Decode(&settings); err != nil || (settings.Version != 1 && settings.Version != 2) {
+	if err := decoder.Decode(&settings); err != nil || (settings.Version != 1 && settings.Version != 2 && settings.Version != 3) {
 		return connectionSettings{}, invalidConnectionSettings()
 	}
 	var extra any
@@ -200,7 +201,12 @@ func decodeConnectionSettings(data []byte) (connectionSettings, error) {
 		}
 		settings.Master[i], seen[address] = address, true
 	}
-	settings.Version, settings.Server, settings.AgentIP = 2, nil, ""
+	if settings.Version != 3 {
+		settings.LocalIP = ""
+	} else {
+		settings.LocalIP = usableLocalIP(net.ParseIP(settings.LocalIP))
+	}
+	settings.Server, settings.AgentIP = nil, ""
 	if ip := net.ParseIP(settings.ObservedIP); ip == nil || ip.IsUnspecified() || ip.IsMulticast() {
 		settings.ObservedIP = ""
 	} else {
@@ -220,18 +226,15 @@ func (d *ConfigDelivery) persistConnectionSettings() error {
 		return err
 	}
 	defer unlock()
-	// A startup copy may predate a discovery made by an earlier run. Preserve
-	// the saved identity when the Master list is unchanged instead of writing
-	// the stale copy over it. Active discovery always commits its new value.
+	// A startup copy may predate a TCP local-IP selection made by an earlier
+	// run. Preserve the saved metadata when the Master list is unchanged, but
+	// never restore an observed relay address as this machine's identity.
 	stored, legacy, err := readConnectionSettings(d.baseDir)
-	if err == nil && !legacy && stored.Version == 2 && slices.Equal(stored.Master, d.bootstrap.masters) {
-		if stored.ObservedIP != "" && d.bootstrap.identity != nil {
-			value := stored.ObservedIP
-			d.bootstrap.identity.ip.Store(&value)
-		}
+	if err == nil && !legacy && stored.Version == 3 && slices.Equal(stored.Master, d.bootstrap.masters) {
+		restoreLocalIdentity(d.bootstrap.identity, stored)
 		return removeLegacyConnectionSettings(d.baseDir)
 	}
-	return writeConnectionSettings(d.baseDir, connectionSettings{Version: 2, Master: d.bootstrap.masters, ObservedIP: d.bootstrap.reportedIP()})
+	return writeConnectionSettings(d.baseDir, connectionSettings{Version: 3, Master: d.bootstrap.masters, LocalIP: d.bootstrap.localIP(), ObservedIP: stored.ObservedIP})
 }
 
 func (d *ConfigDelivery) persistObservedConnection(ip string) error {
@@ -242,7 +245,18 @@ func (d *ConfigDelivery) persistObservedConnection(ip string) error {
 		return err
 	}
 	defer unlock()
-	return writeConnectionSettings(d.baseDir, connectionSettings{Version: 2, Master: d.bootstrap.masters, ObservedIP: ip})
+	return writeConnectionSettings(d.baseDir, connectionSettings{Version: 3, Master: d.bootstrap.masters, ObservedIP: ip})
+}
+
+func (d *ConfigDelivery) persistLocalConnection(ip string) error {
+	connectionSettingsMu.Lock()
+	defer connectionSettingsMu.Unlock()
+	unlock, err := lockConnectionSettings(d.baseDir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	return writeConnectionSettings(d.baseDir, connectionSettings{Version: 3, Master: d.bootstrap.masters, LocalIP: ip})
 }
 
 func lockConnectionSettings(baseDir string) (func(), error) {
@@ -262,7 +276,7 @@ func lockConnectionSettings(baseDir string) (func(), error) {
 // Called only while holding the connection settings directory lock. Temporary
 // files and the committed file contain ciphertext; plaintext stays in memory.
 func writeConnectionSettings(baseDir string, settings connectionSettings) error {
-	data, err := json.Marshal(connectionSettings{Version: 2, Master: settings.Master, ObservedIP: settings.ObservedIP})
+	data, err := json.Marshal(connectionSettings{Version: 3, Master: settings.Master, LocalIP: settings.LocalIP, ObservedIP: settings.ObservedIP})
 	if err != nil || len(data) > maxConnectionBytes {
 		return errors.New("Master connection settings exceed 64 KiB")
 	}

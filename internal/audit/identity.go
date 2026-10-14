@@ -10,7 +10,10 @@ import (
 
 // Shared by immutable runtime config copies, so reconnect discovery updates
 // heartbeats, scans and history together without racing independent workers.
-type agentIdentity struct{ ip atomic.Pointer[string] }
+type agentIdentity struct {
+	ip      atomic.Pointer[string]
+	localIP atomic.Pointer[string] // persisted TCP route identity, separate from an observed peer IP
+}
 
 func (c Config) reportedIP() string {
 	if c.identity != nil {
@@ -20,6 +23,95 @@ func (c Config) reportedIP() string {
 		return ""
 	}
 	return c.AgentIP
+}
+
+// A connected socket tells us which local interface the operating system chose
+// for this route. This needs no public IP service or hostname interpretation.
+func localSocketIP(address net.Addr) string {
+	var ip net.IP
+	switch address := address.(type) {
+	case *net.TCPAddr:
+		if address != nil {
+			ip = address.IP
+		}
+	case *net.UDPAddr:
+		if address != nil {
+			ip = address.IP
+		}
+	default:
+		return ""
+	}
+	return usableLocalIP(ip)
+}
+
+func usableLocalIP(ip net.IP) string {
+	if ip == nil || !ip.IsGlobalUnicast() || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+		return ""
+	}
+	// IP.String canonicalizes IPv4-mapped IPv6 and compressed IPv6 addresses.
+	return ip.String()
+}
+
+func retainedLocalIP(address string, interfaces []net.Addr) string {
+	value := usableLocalIP(net.ParseIP(address))
+	if value == "" {
+		return ""
+	}
+	for _, address := range interfaces {
+		var ip net.IP
+		switch address := address.(type) {
+		case *net.IPNet:
+			if address != nil {
+				ip = address.IP
+			}
+		case *net.IPAddr:
+			if address != nil {
+				ip = address.IP
+			}
+		}
+		if usableLocalIP(ip) == value {
+			return value
+		}
+	}
+	return ""
+}
+
+func restoreLocalIdentity(identity *agentIdentity, settings connectionSettings) {
+	if identity == nil || settings.Version != 3 || settings.LocalIP == "" {
+		return
+	}
+	interfaces, err := net.InterfaceAddrs()
+	if err != nil {
+		return
+	}
+	if value := retainedLocalIP(settings.LocalIP, interfaces); value != "" {
+		identity.localIP.Store(&value)
+		identity.ip.Store(&value)
+	}
+}
+
+func (c Config) localIP() string {
+	if c.identity != nil {
+		if ip := c.identity.localIP.Load(); ip != nil {
+			return *ip
+		}
+	}
+	return ""
+}
+
+// Before a TCP route identity is available, the first usable UDP route wins
+// across concurrent heartbeat/history workers and all configured UDP masters.
+// TCP registration later replaces this temporary selection atomically.
+func (c Config) udpReportedIP(address net.Addr) string {
+	if value := c.reportedIP(); value != "" {
+		return value
+	}
+	value := localSocketIP(address)
+	if value == "" || c.identity == nil {
+		return value
+	}
+	c.identity.ip.CompareAndSwap(nil, &value)
+	return c.reportedIP()
 }
 
 func normalizeEndpoint(address, defaultPort string) (string, error) {

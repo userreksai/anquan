@@ -18,7 +18,7 @@ import (
 	"anqu/internal/sealed"
 )
 
-const version = "0.6.5"
+const version = "0.6.6"
 
 func main() {
 	os.Exit(runPrepared(os.Args[1:], os.Stdout, os.Stderr, sealed.Config, os.Executable, install.Prepare))
@@ -33,7 +33,7 @@ func runPrepared(args []string, stdout, stderr io.Writer, load func() ([]byte, e
 	service := flags.Bool("service", false, "run continuously using setup.interval_seconds")
 	master := flags.String("master", os.Getenv("ANQUAN_MASTER"), "configuration Master hostname or IP, optionally comma-separated (TCP port defaults to 55556); env ANQUAN_MASTER; fresh nodes default to "+defaults.MasterAddress+"; independent of YAML UDP server list")
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: anqu [-service] [-master HOST[:PORT]] [-version]\nOn a fresh Linux node, run as root without arguments to install and start agent.service using "+defaults.MasterAddress+". Use -master / ANQUAN_MASTER for explicit TCP configuration delivery and automatic source-IP discovery. YAML server controls UDP reporting only. Local config.age is optional; saved connection settings allow no-argument checks. Without an audit configuration, -service waits for platform assignment without scanning.")
+		fmt.Fprintln(stderr, "Usage: anqu [-service] [-master HOST[:PORT]] [-version]\nOn a fresh Linux node, run as root without arguments to install and start agent.service using "+defaults.MasterAddress+". Use -master / ANQUAN_MASTER for explicit TCP configuration delivery and automatic local-IP identification. YAML server controls UDP reporting only. Local config.age is optional; saved connection settings allow no-argument checks. Without an audit configuration, -service waits for platform assignment without scanning.")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {

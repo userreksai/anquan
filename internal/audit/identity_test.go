@@ -10,7 +10,7 @@ import (
 	"anqu/internal/sealed"
 )
 
-func TestAutomaticIPAppliesToAllUDPServersAndSurvivesRestart(t *testing.T) {
+func TestObservedFallbackAppliesToAllUDPServersButIsNotRestoredAsLocalIdentity(t *testing.T) {
 	cfg, base := deliveryBootstrap(t)
 	d := NewConfigDelivery(cfg, base, "identity-test")
 	if err := d.observeIP("49.7.214.217"); err != nil {
@@ -64,8 +64,8 @@ func TestAutomaticIPAppliesToAllUDPServersAndSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	cached, err := NewConfigDelivery(restored, base, "test").CachedConfig()
-	if err != nil || cached.reportedIP() != "203.0.113.50" || cached.Server[1] != second.LocalAddr().String() {
-		t.Fatal("restart lost automatic identity or assigned report destinations")
+	if err != nil || cached.reportedIP() != "" || cached.Server[1] != second.LocalAddr().String() {
+		t.Fatal("restart restored a relay identity or lost assigned report destinations")
 	}
 }
 

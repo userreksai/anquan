@@ -47,11 +47,11 @@ func TestFreshBootstrapUsesDefaultDomainAndPreservesConnectionPriority(t *testin
 		t.Fatal(err)
 	}
 	restored, err := BootstrapConfig(Config{}, base, "")
-	if err != nil || len(restored.masters) != 2 || restored.masters[0] != "primary.example.invalid:55557" || restored.masters[1] != "192.0.2.7:55556" || restored.reportedIP() != "203.0.113.7" {
+	if err != nil || len(restored.masters) != 2 || restored.masters[0] != "primary.example.invalid:55557" || restored.masters[1] != "192.0.2.7:55556" || restored.reportedIP() != "" {
 		t.Fatalf("default replaced saved domain/IP or observed identity: %+v %v", restored, err)
 	}
 	overridden, err := BootstrapConfig(Config{}, base, defaults.MasterAddress)
-	if err != nil || len(overridden.masters) != 1 || overridden.masters[0] != defaults.MasterAddress+":55556" || overridden.reportedIP() != "203.0.113.7" {
+	if err != nil || len(overridden.masters) != 1 || overridden.masters[0] != defaults.MasterAddress+":55556" || overridden.reportedIP() != "" {
 		t.Fatalf("explicit Master did not override saved domain or lost identity: %+v %v", overridden, err)
 	}
 }
@@ -76,8 +76,8 @@ func TestSavedConnectionSupportsNoArgumentStartup(t *testing.T) {
 		}
 	}
 	got, err := BootstrapConfig(Config{}, base, "")
-	if err != nil || !got.WaitingForConfig() || got.masters[0] != c.masters[0] || got.reportedIP() != "49.7.214.217" {
-		t.Fatalf("saved connection/observed IP lost: %+v %v", got, err)
+	if err != nil || !got.WaitingForConfig() || got.masters[0] != c.masters[0] || got.reportedIP() != "" {
+		t.Fatalf("saved Master lost or observed address restored as local identity: %+v %v", got, err)
 	}
 }
 
@@ -96,14 +96,14 @@ func TestLegacyConnectionSettingsMigrateAndRemovePlaintext(t *testing.T) {
 				t.Fatal(err)
 			}
 			got, err := BootstrapConfig(Config{}, base, "")
-			if err != nil || got.masters[0] != "192.0.2.7:55556" || got.reportedIP() != tc.ip {
+			if err != nil || got.masters[0] != "192.0.2.7:55556" || got.reportedIP() != "" {
 				t.Fatalf("migration lost Master/discovered identity: %+v, %v", got, err)
 			}
 			if _, err := os.Lstat(legacy); !os.IsNotExist(err) {
 				t.Fatalf("obsolete plaintext remains: %v", err)
 			}
 			settings := decryptSavedConnection(t, base)
-			if settings.Version != 2 || settings.Master[0] != "192.0.2.7:55556" || settings.ObservedIP != tc.ip || settings.AgentIP != "" || settings.Server != nil {
+			if settings.Version != 3 || settings.Master[0] != "192.0.2.7:55556" || settings.ObservedIP != tc.ip || settings.LocalIP != "" || settings.AgentIP != "" || settings.Server != nil {
 				t.Fatalf("migration retained legacy fields: %+v", settings)
 			}
 		})
@@ -113,7 +113,7 @@ func TestLegacyConnectionSettingsMigrateAndRemovePlaintext(t *testing.T) {
 func TestInvalidConnectionSettingsRequireExplicitMasterAndCanBeRepaired(t *testing.T) {
 	for _, encrypted := range []bool{false, true} {
 		for _, invalid := range []string{
-			`{"version":3}`, `{"version":2,"master":["invalid/hostname"]}`,
+			`{"version":4}`, `{"version":2,"master":["invalid/hostname"]}`,
 			`{"version":2,"master":[]} {}`, `{"version":2,"unknown":true}`,
 			`{"version":2,"master":["192.0.2.7","192.0.2.7:55556"]}`,
 			strings.Repeat(" ", maxConnectionBytes+1),
@@ -166,7 +166,7 @@ func TestCiphertextTakesPrecedenceOverLegacyConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, err := BootstrapConfig(Config{}, base, "")
-	if err != nil || got.masters[0] != "192.0.2.8:55556" || got.reportedIP() != "203.0.113.8" {
+	if err != nil || got.masters[0] != "192.0.2.8:55556" || got.reportedIP() != "" {
 		t.Fatalf("plaintext replaced authoritative ciphertext: %+v, %v", got, err)
 	}
 	if _, err := os.Lstat(legacy); !os.IsNotExist(err) {
@@ -207,7 +207,7 @@ func TestDamagedCiphertextDoesNotFallBackToPlaintext(t *testing.T) {
 	}
 }
 
-func TestInitialConnectionSavePreservesNewerDiscoveredIdentity(t *testing.T) {
+func TestInitialConnectionSavePreservesMetadataWithoutRestoringObservedIdentity(t *testing.T) {
 	base := t.TempDir()
 	stale, err := BootstrapConfig(Config{}, base, "192.0.2.7")
 	if err != nil {
@@ -227,8 +227,8 @@ func TestInitialConnectionSavePreservesNewerDiscoveredIdentity(t *testing.T) {
 	if err := NewConfigDelivery(stale, base, "test").persistConnectionSettings(); err != nil {
 		t.Fatal(err)
 	}
-	if settings := decryptSavedConnection(t, base); settings.ObservedIP != "203.0.113.50" || stale.reportedIP() != settings.ObservedIP {
-		t.Fatal("stale initial save replaced discovered identity")
+	if settings := decryptSavedConnection(t, base); settings.ObservedIP != "203.0.113.50" || stale.reportedIP() != "" {
+		t.Fatal("stale initial save replaced metadata or restored a relay identity")
 	}
 	unchanged, err := os.ReadFile(filepath.Join(base, ConnectionFilename))
 	if err != nil || !bytes.Equal(ciphertext, unchanged) {
@@ -281,7 +281,7 @@ func TestConnectionMigrationRechecksCiphertextAfterWaitingForWriter(t *testing.T
 	unlock()
 	select {
 	case got := <-result:
-		if got.err != nil || got.cfg.masters[0] != "192.0.2.8:55556" || got.cfg.reportedIP() != "203.0.113.8" {
+		if got.err != nil || got.cfg.masters[0] != "192.0.2.8:55556" || got.cfg.reportedIP() != "" {
 			t.Fatalf("migration overwrote the concurrent writer's ciphertext: %+v, %v", got.cfg, got.err)
 		}
 	case <-time.After(2 * time.Second):
