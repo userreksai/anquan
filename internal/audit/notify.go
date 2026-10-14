@@ -113,9 +113,7 @@ func sendUDP(c Config, messagesForIP func(string) ([][]byte, error)) []Notificat
 		result := NotificationResult{Server: endpoint}
 		conn, err := net.DialTimeout("udp", endpoint, 2*time.Second)
 		if err == nil {
-			// Until discovery succeeds, the receiving master uses the actual
-			// UDP source instead of a private socket IP.
-			result.IP = c.reportedIP()
+			result.IP = c.udpReportedIP(conn.LocalAddr())
 			var messages [][]byte
 			messages, err = messagesForIP(result.IP)
 			if err == nil {

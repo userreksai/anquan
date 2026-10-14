@@ -335,7 +335,7 @@ func TestNoArgumentHostnameCheckFetchesMasterConfigAndReportsSSHLogin(t *testing
 		}
 		served <- err
 	}()
-	runCheck := func(wantLogin string) {
+	runCheck := func(wantLogin, wantIP string) {
 		t.Helper()
 		var stdout, stderr bytes.Buffer
 		code := run(nil, &stdout, &stderr, func() ([]byte, error) { return nil, os.ErrNotExist }, func() (string, error) { return filepath.Join(base, "anqu"), nil })
@@ -361,14 +361,14 @@ func TestNoArgumentHostnameCheckFetchesMasterConfigAndReportsSSHLogin(t *testing
 				t.Fatal(err)
 			}
 			if event.Type == "ssh_login" {
-				if event.IP != "192.0.2.21" || event.Data.ID != wantLogin || event.Data.SourceIP != "192.0.2.50" {
+				if event.IP != wantIP || event.Data.ID != wantLogin || event.Data.SourceIP != "192.0.2.50" {
 					t.Fatalf("wrong SSH login identity: %+v", event)
 				}
 				break
 			}
 		}
 	}
-	runCheck("first-login")
+	runCheck("first-login", "192.0.2.21")
 	if err := <-served; err != nil {
 		t.Fatal(err)
 	}
@@ -378,7 +378,9 @@ func TestNoArgumentHostnameCheckFetchesMasterConfigAndReportsSSHLogin(t *testing
 	t.Setenv("ANQUAN_MASTER", "")
 	t.Setenv("ANQUAN_AGENT_IP", "")
 	putLogin("second-login")
-	runCheck("second-login")
+	// A legacy observed peer may be a relay, so it is not restored as a local
+	// machine identity when this loopback-only test cannot select a real route.
+	runCheck("second-login", "")
 	assertNoReports(t, filepath.Join(base, "assigned"))
 	if results := logEvents(t, filepath.Join(base, "assigned", "logs"), "scan_complete"); len(results) != 2 {
 		t.Fatal("no-argument invocation did not perform exactly one scan")

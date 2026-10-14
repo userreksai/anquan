@@ -11,7 +11,7 @@ setup:
   interval_seconds: 300
 ```
 
-机器 IP 自动识别：配置 TCP Master 返回连接的实际来源地址，Agent 将其用于全部 UDP 上报；跨公网 NAT 直连时为公网出口 IP。无需配置 agent_ip，旧 YAML 的该字段以及 ANQUAN_AGENT_IP 被忽略。没有识别结果时 UDP ip 为空，接收 Master 使用数据报来源地址。多个节点共用同一出口公网 IP 时仍受现有 IP 主键约束，不能区分为不同机器。
+v0.6.6 自动识别本机 IP：Agent 读取已建立 TCP 连接的 LocalAddr，使用操作系统为到配置主控的路由选择的网卡地址，不做公网探测，也不从主机名推断。该地址用于 TCP 登记和全部 UDP 上报；Nginx/NAT 后的连接来源另存，不覆盖机器身份。TCP 未取得身份时，首个合格 UDP LocalAddr 经原子选择后由同一进程的心跳、扫描、SSH 登录和命令历史共享，TCP 连接成功后刷新。IPv4 和 IPv6 均规范化，回环、链路本地、组播及未指定地址不作为本机身份；仅回环连接或缺少可用地址时兼容旧来源识别。无需配置 agent_ip，旧 YAML 的该字段以及 ANQUAN_AGENT_IP 被忽略。仍无识别结果时 UDP ip 为空，接收 Master 使用数据报来源地址。机器主键仍是 IP，不同网络中地址相同的节点仍会碰撞。
 
 主控以 `ip` 为机器主键，`host` 仅作为主机名展示。接收旧 Agent 的报文缺少 `ip` 时，使用 UDP 数据报来源 IP。UDP 来源端口是临时端口，不能当作机器标识。机器 IP 变化会形成新的机器记录。该协议用于内网传输，无需认证或加密；主控开通对应 Agent 机器访问 `55555/udp` 的网络即可。
 
@@ -71,16 +71,16 @@ Linux 新机器从上传目录无参数执行会完成安装并启动后台服�
 每帧是 UTF-8 JSON 加换行（NDJSON），最大 8 MiB，`version: 1`。JSON 字符串内的 age 密文换行使用 JSON 转义。第一帧：
 
 ```json
-{"version":1,"type":"hello","discover_ip":true,"host":"node-a","agent_version":"0.6.5"}
+{"version":1,"type":"hello","ip":"172.22.0.27","reported_ip":"172.22.0.27","host":"node-a","agent_version":"0.6.6"}
 ```
 
-主控按 TCP 实际来源 IP 登记机器，先回复身份，再发送最新分配：
+本机模式省略 discover_ip（false），`ip` 与 `reported_ip` 必须是同一规范化本机 IP。旧 Master 已支持显式 hello.ip，因此不识别新增字段时仍按本机 IP 登记，并直接发送配置；新版 Master 识别 reported_ip 后先确认身份再发送最新分配：
 
 ```json
-{"version":1,"type":"identity","ip":"49.7.214.217"}
+{"version":1,"type":"identity","ip":"172.22.0.27"}
 ```
 
-Agent 验证并保存此地址，后续数据上报使用该 IP。旧 Agent 不发送 discover_ip 时，主控保留旧握手流程及上报 IP 语义，不主动发送新 identity 帧。识别地址是主控实际看到的连接来源，经代理或内网路径时可能是代理/内网地址，并非通用公网 IP 查询服务。
+Agent 在发送 hello 前先加密保存本机地址并更新共享身份。新版主控确认帧必须与 Agent 选定的本机地址一致；返回代理地址或其它不同值时断开连接，保留本机身份，避免污染 UDP。旧 Agent 的 discover_ip=true 流程保留：主控按实际连接来源回复 identity；新版 Agent 仅在无法取得可用本机地址时使用该回退。旧 Agent 经过普通中转时仍可能被识别为中转地址，必须升级 Agent 才能主动携带本机 IP。
 
 没有分配时，revision 和 ciphertext 同时为空：
 
@@ -98,7 +98,7 @@ Agent 先验证 revision、age 完整性和节点平台的 YAML 配置，再原�
 
 Agent 每 30 秒发送 `{"version":1,"type":"ping"}`，主控回复 `{"version":1,"type":"pong"}`。有效 hello 和 ping 更新机器活动时间；连接异常后 Agent 自动重连。页面 `connected` 单独表示配置 TCP 连接，机器 `online` 仍按最近活动时间及既有超时阈值计算。
 
-主控配置优先于可选本地 config.age，启动先使用有效缓存，再限时同步；无缓存且无本地配置时常驻等待。无参数仍执行一次巡检及 SSH 登录上报。下发 server 列表立即生效并替换 UDP 目标，TCP 配置地址及自动 IP 不由 YAML 控制。连接文件 version 2 保存 master 列表和 observed_ip；version 1 自动迁移为 TCP 55556 并忽略旧手工 agent_ip。服务账号需要程序目录的缓存写入权限。升级顺序为 Master、Agent，再更新 Web 示例。
+主控配置优先于可选本地 config.age，启动先使用有效缓存，再限时同步；无缓存且无本地配置时常驻等待。无参数仍执行一次巡检及 SSH 登录上报。下发 server 列表立即生效并替换 UDP 目标，TCP 配置地址及自动 IP 不由 YAML 控制。连接文件 version 3 保存 master、local_ip 和兼容回退 observed_ip；version 1/2 自动迁移，并忽略旧手工 agent_ip。重启仅恢复仍属于本机接口的 local_ip，observed_ip 仅留作兼容元数据，不恢复为机器身份。临时 UDP 路由身份不强制落盘，由 TCP 选取的本机 IP 持久化。服务账号需要程序目录的缓存写入权限。升级顺序为 Master、Agent，再更新 Web 示例。升级后本机 IP 会成为新的机器记录；已有代理记录可能混合多个节点的历史，不自动迁移或删除，旧目标的配置需按真实机器重新确认下发。
 
 此通道沿用内网机器 IP 信任方式，没有单独的节点认证或 TLS；age 密文用于配置加密，不构成 Master 身份认证。仅允许可信 Agent 网络访问 55556/TCP。既有 UDP、HTTP 与 Webhook 的传输行为保持原有协议。
 

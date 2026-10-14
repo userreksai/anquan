@@ -315,7 +315,7 @@ func sendHistoryToMaster(ctx context.Context, c Config, host, endpoint string, e
 	defer conn.Close()
 	stop := context.AfterFunc(ctx, func() { conn.Close() })
 	defer stop()
-	ip := c.reportedIP()
+	ip := c.udpReportedIP(conn.LocalAddr())
 	for _, event := range events {
 		if err := ctx.Err(); err != nil {
 			return err
