@@ -134,9 +134,8 @@ func TestInstallFromArbitraryDirectoryAndRepeat(t *testing.T) {
 	wantFile(t, filepath.Join(paths.directory, "config.age"), "encrypted configuration")
 	wantFile(t, paths.script, hook)
 	for _, name := range []string{"state", "logs", "textfile"} {
-		info, err := os.Stat(filepath.Join(paths.directory, name))
-		if err != nil || !info.IsDir() {
-			t.Fatalf("missing runtime directory %s: %v", name, err)
+		if _, err := os.Lstat(filepath.Join(paths.directory, name)); !os.IsNotExist(err) {
+			t.Fatalf("installation precreated unused runtime directory %s: %v", name, err)
 		}
 	}
 	if target, err := os.Readlink(paths.sshrc); err != nil || target != paths.script {
@@ -147,6 +146,73 @@ func TestInstallFromArbitraryDirectoryAndRepeat(t *testing.T) {
 	}
 	if _, err := os.Stat(paths.sshrc + ".anquan.bak"); !os.IsNotExist(err) {
 		t.Fatal("matching SSH link was backed up")
+	}
+}
+
+func TestUploadBackupCleanupDoesNotRemoveReplacements(t *testing.T) {
+	for _, replacement := range []string{"file", "directory", "symlink"} {
+		t.Run(replacement, func(t *testing.T) {
+			if replacement == "symlink" {
+				requireSymlinks(t)
+			}
+			backup := filepath.Join(t.TempDir(), "anquan.upload-reserved")
+			put(t, backup, "uploaded agent")
+			original, err := os.Lstat(backup)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Capture Windows' lazily loaded file identity before changing paths.
+			if !os.SameFile(original, original) {
+				t.Fatal("cannot capture upload backup identity")
+			}
+			if err := os.Rename(backup, backup+".original"); err != nil {
+				t.Fatal(err)
+			}
+			switch replacement {
+			case "file":
+				put(t, backup, "replacement file")
+			case "directory":
+				if err := os.Mkdir(backup, 0700); err != nil {
+					t.Fatal(err)
+				}
+			case "symlink":
+				if err := os.Symlink(backup+".original", backup); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := removeUploadedBackup(backup, original); err == nil || !strings.Contains(err.Error(), "changed before cleanup") {
+				t.Fatalf("replacement cleanup error: %v", err)
+			}
+			if _, err := os.Lstat(backup); err != nil {
+				t.Fatalf("replacement was removed: %v", err)
+			}
+			wantFile(t, backup+".original", "uploaded agent")
+		})
+	}
+}
+
+func TestUploadBackupCleanupOnlyRemovesReservedFile(t *testing.T) {
+	root := t.TempDir()
+	backup := filepath.Join(root, "anquan.upload-reserved")
+	older := filepath.Join(root, "anquan.upload-existing")
+	installed := filepath.Join(root, "anquan", "anquan")
+	put(t, backup, "uploaded agent")
+	put(t, older, "older backup")
+	put(t, installed, "installed agent")
+	original, err := os.Lstat(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := removeUploadedBackup(backup, original); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(backup); !os.IsNotExist(err) {
+		t.Fatalf("reserved upload backup remains after cleanup: %v", err)
+	}
+	wantFile(t, older, "older backup")
+	wantFile(t, installed, "installed agent")
+	if err := removeUploadedBackup(backup, original); err != nil {
+		t.Fatalf("already removed backup: %v", err)
 	}
 }
 

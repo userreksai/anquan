@@ -33,7 +33,11 @@ func RequestSSHExecution(parent context.Context, baseDir string, req SSHExecutio
 		return fmt.Errorf("SSH execution base directory must be absolute")
 	}
 	path := SSHExecutionSocket(baseDir)
-	if err := verifySSHExecutionDirectory(filepath.Dir(path)); err != nil {
+	verifyDirectory := verifySSHExecutionDirectory
+	if usesSystemRuntimeDirectory(baseDir) {
+		verifyDirectory = verifySystemRuntimeDirectory
+	}
+	if err := verifyDirectory(filepath.Dir(path)); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("%w: %v", ErrSSHExecutionUnavailable, err)
 		}
@@ -327,14 +331,14 @@ func listenSSHExecutions(baseDir string) (*net.UnixListener, os.FileInfo, error)
 	}
 	path := SSHExecutionSocket(baseDir)
 	dir := filepath.Dir(path)
-	if err := os.Mkdir(dir, 0755); err != nil && !os.IsExist(err) {
-		return nil, nil, err
-	}
-	if err := verifySSHExecutionDirectory(dir); err != nil {
-		return nil, nil, err
-	}
-	if err := os.Chmod(dir, 0755); err != nil {
-		return nil, nil, err
+	if usesSystemRuntimeDirectory(baseDir) {
+		if err := prepareSystemRuntimeDirectory(dir, 0755); err != nil {
+			return nil, nil, err
+		}
+	} else {
+		if err := ensureRootRuntimeDirectory(dir, 0755); err != nil {
+			return nil, nil, err
+		}
 	}
 	if err := clearStaleSSHExecutionSocket(path); err != nil {
 		return nil, nil, err

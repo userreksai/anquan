@@ -36,14 +36,16 @@ func prepare(path string, args []string, writer io.Writer, paths layout, ops run
 	if err != nil {
 		return Preparation{}, err
 	}
+	var backupInfo os.FileInfo
 	if backup != "" {
 		defer func() {
 			if err != nil {
 				err = fmt.Errorf("%w; uploaded agent preserved at %s; run %s to retry installation", err, backup, source)
 			}
 		}()
-		if writer != nil {
-			fmt.Fprintf(writer, "Preserved uploaded agent at %s before creating %s.\n", backup, paths.directory)
+		backupInfo, err = os.Lstat(backup)
+		if err != nil {
+			return Preparation{}, fmt.Errorf("inspect relocated uploaded agent: %w", err)
 		}
 	}
 	pending := false
@@ -67,6 +69,11 @@ func prepare(path string, args []string, writer io.Writer, paths layout, ops run
 	if len(args) == 0 && (relocated || !serviceExists || pending) {
 		if err := installService(paths, ops.systemctl, serviceExists); err != nil {
 			return Preparation{}, err
+		}
+		if backup != "" {
+			if err := removeUploadedBackup(backup, backupInfo); err != nil {
+				return Preparation{}, err
+			}
 		}
 		if writer != nil {
 			fmt.Fprintf(writer, "Installed %s; SSH login hook ready; %s enabled and started with Master %s.\n", paths.executable, ServiceName, defaults.MasterAddress)

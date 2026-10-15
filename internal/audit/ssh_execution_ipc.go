@@ -19,6 +19,9 @@ const sshExecutionFrameLimit = 4096
 // SSHExecutionSocket is shared by the installed client and its root service.
 // The separate root-owned directory prevents users replacing the socket.
 func SSHExecutionSocket(baseDir string) string {
+	if usesSystemRuntimeDirectory(baseDir) {
+		baseDir = systemAgentRuntimeDirectory
+	}
 	return filepath.Join(baseDir, ".ssh-execution", "agent.sock")
 }
 

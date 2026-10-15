@@ -31,8 +31,9 @@ type Preparation struct {
 
 // clearUploadedDirectory makes room when the running upload itself occupies the
 // required installation directory, for example /usr/local/anquan. Preserve it
-// under a unique name beside the directory so settings beside the upload keep
-// resolving from the same parent. Never move unrelated files or symbolic links.
+// temporarily under a unique name beside the directory so settings beside the
+// upload keep resolving from the same parent. Never move unrelated files or
+// symbolic links. A successful service deployment removes this backup.
 func clearUploadedDirectory(source, directory string, euid int) (string, string, error) {
 	info, err := os.Lstat(directory)
 	if os.IsNotExist(err) {
@@ -93,11 +94,6 @@ func ensure(source string, paths layout) (relocated bool, err error) {
 		return false, err
 	}
 	defer unlock()
-	for _, name := range []string{"state", "logs", "textfile"} {
-		if err := ensureDirectory(filepath.Join(paths.directory, name)); err != nil {
-			return false, err
-		}
-	}
 	relocated, err = installExecutable(source, paths.executable)
 	if err != nil {
 		return false, err
@@ -116,6 +112,25 @@ func ensure(source string, paths layout) (relocated bool, err error) {
 		return false, err
 	}
 	return relocated, nil
+}
+
+// removeUploadedBackup only removes the exact file reserved by this invocation.
+// Older upload backups and replacements at the reserved path remain untouched.
+func removeUploadedBackup(path string, original os.FileInfo) error {
+	current, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect temporary uploaded agent: %w", err)
+	}
+	if !current.Mode().IsRegular() || !os.SameFile(original, current) {
+		return fmt.Errorf("temporary uploaded agent changed before cleanup: %s", path)
+	}
+	if err := os.Remove(path); err != nil {
+		return fmt.Errorf("remove temporary uploaded agent: %w", err)
+	}
+	return nil
 }
 
 func ensureDirectory(path string) error {
