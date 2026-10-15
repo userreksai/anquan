@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -67,12 +68,27 @@ func prepareSession(c Config) error {
 		return nil
 	}
 	for _, item := range []struct{ suffix, kind string }{
-		{"", "md5"}, {".files", "files"}, {".processes", "processes"}, {".logins", "login"},
+		{"", "md5"}, {".files", "files"}, {".processes", "processes"},
 	} {
 		path := c.StateFile + item.suffix
 		if err := protectLegacyState(path, item.kind); err != nil {
 			return fmt.Errorf("encrypt existing state %s: %w", path, err)
 		}
+	}
+	// Login collection has its own lock because a realtime worker can advance
+	// this cursor while file/process checks are establishing their baselines.
+	if _, err := os.Lstat(c.StateFile + ".logins"); err == nil {
+		unlock, err := lockSSHLoginState(context.Background(), c)
+		if err != nil {
+			return err
+		}
+		err = protectLegacyState(c.StateFile+".logins", "login")
+		unlock()
+		if err != nil {
+			return fmt.Errorf("encrypt existing login state: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
 	}
 	c.session.prepared = true
 	return nil

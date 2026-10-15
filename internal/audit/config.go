@@ -34,6 +34,7 @@ type Config struct {
 	location          *time.Location
 	session           *baselineSession
 	waitingForConfig  bool
+	realtimeLogin     bool
 	masters           []string
 	identity          *agentIdentity
 }
@@ -58,6 +59,7 @@ type LoginConfig struct {
 	InitialLookbackHours int    `json:"initial_lookback_hours" yaml:"initial_lookback_hours"`
 	TimeoutSeconds       int    `json:"timeout_seconds" yaml:"timeout_seconds"`
 	MaxRecords           int    `json:"max_records" yaml:"max_records"`
+	PollIntervalMS       int    `json:"poll_interval_ms" yaml:"poll_interval_ms"`
 }
 
 type ExistenceConfig struct {
@@ -315,6 +317,12 @@ func normalizeConfig(c Config, base string, rules pathRules) (Config, error) {
 		}
 	}
 	if c.Login.Enabled {
+		if c.Login.PollIntervalMS == 0 {
+			c.Login.PollIntervalMS = 1000
+		}
+		if c.Login.PollIntervalMS < 100 || c.Login.PollIntervalMS > 60000 {
+			return c, fmt.Errorf("login.poll_interval_ms must be 100..60000")
+		}
 		if c.Login.JournalCommand == "" {
 			c.Login.JournalCommand = "journalctl"
 		}

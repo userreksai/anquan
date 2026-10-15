@@ -57,10 +57,11 @@ history:
 login:
   enabled: true
   source: journal            # journal（推荐）、authlog、jsonl、wtmp
+  poll_interval_ms: 1000     # v0.6.7 常驻模式每秒独立采集；100..60000，省略默认 1000
   journal_command: journalctl
   initial_lookback_hours: 24 # journal/authlog/wtmp 初次回看时长
   timeout_seconds: 10
-  max_records: 1000          # 每轮处理页上限，后续轮次继续读取，不只取最后一次登录
+  max_records: 1000          # 每次采集处理页上限，后续轮次继续读取，不只取最后一次登录
   # authlog: source 改为 authlog，path 改为 /var/log/auth.log 或 /var/log/secure
   # jsonl: source 改为 jsonl，path 填每行一条成功登录记录的 JSONL 文件
   # wtmp: source 改为 wtmp，path 填 /var/log/wtmp，last_command 填 last
@@ -82,7 +83,9 @@ server: []
 setup:
   logs: /var/log/时间anquan.log
   prom: /var/lib/node_exporter/textfile_collector/process_monitor.prom
-  interval_seconds: 300     # -service 模式：首次立即执行，之后每 300 秒检查，不重叠执行
+  interval_seconds: 300     # -service 完整文件/进程巡检周期；SSH 使用 login.poll_interval_ms
+# SSH 沿用已有 .logins 游标，升级无需删除状态；每秒采集不保证机器人消息每秒送达。
+# SSH UDP 上报仍为尽力发送；通知另受 Master 入库、机器人网络和接收端响应耗时影响。
 # logs 的“时间”或 {date} 替换为北京时间 YYYYMMDD，零点换新文件。
 # prom 每轮原子覆盖同一个文件，不添加时间前缀；旧文件名中的“时间”/{date}/{time} 会被移除。
 # logs 不写占位符时自动添加日期前缀。占位符只允许出现在文件名。

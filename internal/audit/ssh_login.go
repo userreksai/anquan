@@ -41,6 +41,10 @@ type authLogCursor struct {
 }
 
 func collectSSHLogins(c Config, now time.Time) (LoginResult, *loginBaseline, []Issue) {
+	return collectSSHLoginsContext(context.Background(), c, now)
+}
+
+func collectSSHLoginsContext(ctx context.Context, c Config, now time.Time) (LoginResult, *loginBaseline, []Issue) {
 	lc := c.Login
 	r := LoginResult{Enabled: lc.Enabled, Success: true, Source: lc.Source, Path: lc.Path, Records: []LoginRecord{}}
 	if !lc.Enabled {
@@ -84,7 +88,7 @@ func collectSSHLogins(c Config, now time.Time) (LoginResult, *loginBaseline, []I
 	r.Record = s.Latest
 	switch lc.Source {
 	case "journal":
-		r.Records, r.Pending, err = readJournalLogins(lc, s)
+		r.Records, r.Pending, err = readJournalLoginsContext(ctx, lc, s)
 	case "authlog":
 		r.Records, r.Pending, err = readAuthLogins(lc, s, now)
 	case "jsonl", "wtmp":
@@ -97,7 +101,7 @@ func collectSSHLogins(c Config, now time.Time) (LoginResult, *loginBaseline, []I
 				f.Close()
 			}
 		} else {
-			records, err = readAllWtmp(lc)
+			records, err = readAllWtmpContext(ctx, lc)
 		}
 		if err == nil {
 			r.Records, r.Pending = unseenLogins(records, lc.MaxRecords, s, lc.Source == "wtmp")
@@ -170,7 +174,11 @@ func unseenLogins(records []LoginRecord, limit int, s *loginBaseline, boundedHis
 // Unlike the legacy latest-login adapter, this reads the complete retained
 // wtmp. The output cap fails explicitly instead of discarding older records.
 func readAllWtmp(c LoginConfig) ([]LoginRecord, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(c.TimeoutSeconds)*time.Second)
+	return readAllWtmpContext(context.Background(), c)
+}
+
+func readAllWtmpContext(parent context.Context, c LoginConfig) ([]LoginRecord, error) {
+	ctx, cancel := context.WithTimeout(parent, time.Duration(c.TimeoutSeconds)*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.LastCommand, "-w", "-i", "--time-format", "iso", "-f", c.Path)
 	cmd.Env = append(os.Environ(), "LC_ALL=C", "TZ=UTC")
@@ -204,7 +212,11 @@ func journalArgs(c LoginConfig, s *loginBaseline) []string {
 }
 
 func readJournalLogins(c LoginConfig, s *loginBaseline) ([]LoginRecord, bool, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(c.TimeoutSeconds)*time.Second)
+	return readJournalLoginsContext(context.Background(), c, s)
+}
+
+func readJournalLoginsContext(parent context.Context, c LoginConfig, s *loginBaseline) ([]LoginRecord, bool, error) {
+	ctx, cancel := context.WithTimeout(parent, time.Duration(c.TimeoutSeconds)*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.JournalCommand, journalArgs(c, s)...)
 	cmd.Env = append(os.Environ(), "LC_ALL=C")

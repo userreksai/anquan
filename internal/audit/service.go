@@ -47,6 +47,7 @@ func serveWithHeartbeatInterval(ctx context.Context, c Config, writer io.Writer,
 }
 
 func serveRuntime(ctx context.Context, c Config, writer io.Writer, version string, scan func(Config, io.Writer) (Report, OutputPaths, error), heartbeatInterval time.Duration, delivery *ConfigDelivery) error {
+	c.realtimeLogin = true
 	if c.Interval() <= 0 {
 		return fmt.Errorf("check interval must be positive")
 	}
@@ -83,7 +84,7 @@ func serveRuntime(ctx context.Context, c Config, writer io.Writer, version strin
 		}
 		workerCtx, cancel := context.WithCancel(ctx)
 		var workers sync.WaitGroup
-		workers.Add(2)
+		workers.Add(3)
 		go func() {
 			defer workers.Done()
 			heartbeatLoop(workerCtx, cfg, writer, version, heartbeatInterval)
@@ -91,6 +92,10 @@ func serveRuntime(ctx context.Context, c Config, writer io.Writer, version strin
 		go func() {
 			defer workers.Done()
 			historyLoop(workerCtx, cfg, writer)
+		}()
+		go func() {
+			defer workers.Done()
+			sshLoginLoop(workerCtx, cfg, writer)
 		}()
 		return func() { cancel(); workers.Wait() }
 	}
@@ -194,6 +199,7 @@ func serveRuntime(ctx context.Context, c Config, writer io.Writer, version strin
 				unlock = nextUnlock
 			}
 			c = NewSession(next)
+			c.realtimeLogin = true
 			startup = nil
 			stopWorkers = startWorkers(c)
 			resetTicker()
