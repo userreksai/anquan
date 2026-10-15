@@ -19,6 +19,7 @@ import (
 func sshRealtimeConfig(t *testing.T) Config {
 	t.Helper()
 	c := monitoringTestConfig(t)
+	c.Login.Mode = "poll"
 	c.Setup.IntervalSeconds = 300
 	c.Login.PollIntervalMS = 100
 	return c

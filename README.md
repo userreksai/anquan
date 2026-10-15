@@ -1,8 +1,8 @@
-# Anqu 安全检测 Agent（v0.6.7）
+# Anqu 安全检测 Agent（v0.6.8）
 
 Anqu 在 Linux 节点持续检查文件 MD5、文件增删和进程变化，并逐条记录成功的 SSH 登录。服务启动时记录当前时间，每轮将当前主机的完整检测结果和告警写入日志，并更新固定路径的 Prometheus 文件。运行日志按北京时间零点切换文件，不再生成时间戳命名的单轮 JSON 报告。
 
-v0.6.7 常驻服务独立采集 SSH 登录，`login.poll_interval_ms` 默认 1000 毫秒，不等待默认 300 秒的文件/进程完整巡检。旧配置省略新字段也默认每秒采集，升级沿用已有 `.logins` 游标。
+v0.6.8 默认 `login.mode: trigger`：已安装路径每次无参数执行立即请求上报一次真实 SSH 登录，同一会话连续执行也生成独立事件，服务巡检不会额外补发登录。原有两行 `ssh-init.sh` 保持兼容。需要 v0.6.7 的每秒增量采集和跨轮去重时，明确设置 `login.mode: poll`；完整文件/进程巡检仍默认每 300 秒运行。
 
 本目录是 [anquan Agent](https://github.com/userreksai/anquan)。新机器自动连接固定主控域名 `sa.sa.ops.tw:55556/TCP` 接收配置，通过配置中的 UDP `server` 列表向 [Master 主控](https://github.com/userreksai/anquan-server-master) 上报；UDP 默认关闭。详细需求对应关系见 [需求与实现说明](docs/需求与实现说明.md)，字段约定见 [Agent / Master 协议](docs/agent-master-protocol.md)。
 
@@ -33,11 +33,11 @@ v0.6.6 从已建立的 TCP 连接读取操作系统为该路由选定的本机�
 
 自动单元在 `[Service]` 中设置 `Environment=ANQUAN_MASTER=sa.sa.ops.tw`，并通过 `ExecStart=/usr/local/anquan/anquan -service -master sa.sa.ops.tw` 固定连接域名。原有 `master.conf` 的环境变量不能覆盖这个启动参数；已有其它 systemd drop-in 保留，升级旧机器时须核对是否覆盖了 `ExecStart`。仓库的 `deploy/agent.service` 与自动安装单元一致；旧 `deploy/anqu.service` 仍供手工部署使用。
 
-Agent 自动将主控地址和机器标识加密保存为 `/usr/local/anquan/agent.connection.age`，无需手工创建；v3 元数据分别记录 `local_ip` 和兼容回退的 `observed_ip`，重启仅恢复仍属于本机网卡的 `local_ip`，不把旧观察到的代理地址恢复为身份。旧 v1/v2 文件自动迁移，旧 `agent.connection.json` 成功加密迁移后删除。默认域名内置为 `sa.sa.ops.tw`，解析后的主控 IP 不固定在程序中。此后手工执行 `sudo /usr/local/anquan/anquan` 不需要任何参数或环境变量：使用已有平台缓存或限时获取下发配置，执行一次巡检并上报 SSH 登录后退出。登录是否开启、来源和回看范围使用平台/本地有效配置，登录游标继续保留。等待配置的常驻服务保持 TCP hello/ping 在线，首次配置到达前不采集登录。
+Agent 自动将主控地址和机器标识加密保存为 `/usr/local/anquan/agent.connection.age`，无需手工创建；v3 元数据分别记录 `local_ip` 和兼容回退的 `observed_ip`，重启仅恢复仍属于本机网卡的 `local_ip`，不把旧观察到的代理地址恢复为身份。旧 v1/v2 文件自动迁移，旧 `agent.connection.json` 成功加密迁移后删除。默认域名内置为 `sa.sa.ops.tw`，解析后的主控 IP 不固定在程序中。此后执行 `/usr/local/anquan/anquan` 或 `-ssh-report` 会向 root 服务请求本次 SSH 上报；每次执行使用新的事件 ID，不运行文件/进程巡检，也不消费 `.logins` 游标。root 未保留 `SSH_CONNECTION` 时可以请求最近一条真实认证快照；普通用户必须来自可验证的 SSH 上下文。完整单次巡检改用 `-scan`。等待配置的常驻服务保持 TCP hello/ping 在线，首次配置到达前不采集登录，也不接受无有效配置的执行上报。
 
 在“管理设置 → Age 配置加密”编辑 YAML，点击“下发配置”，选择目标机器并确认。Master 按机器保存加密配置，在线机器通过现有长连接接收；离线机器重连后自动接收。页面显示待下发、已应用或应用失败，已应用以 Agent 完成校验、保存和切换后的确认消息为准。非法 YAML 或无法应用的配置不会覆盖 Agent 当前有效配置。
 
-主控下发的配置以 `config.master.age` 原子保存在 Agent 可执行文件旁，优先于本地 `config.age`；重启或主控暂时不可达时仍使用有效缓存，无需补建本地配置。主控明确返回未给本机分配配置时，Agent 清除主控缓存并恢复本地配置；没有本地配置则继续等待，不执行巡检。常驻模式在当前扫描完成后切换并立即按新配置扫描；无参数单次模式只在启动时限时同步，仍没有配置时返回 1。切换配置会重新建立文件/进程基线，登录和命令游标沿用对应状态路径。
+主控下发的配置以 `config.master.age` 原子保存在 Agent 可执行文件旁，优先于本地 `config.age`；重启或主控暂时不可达时仍使用有效缓存，无需补建本地配置。主控明确返回未给本机分配配置时，Agent 清除主控缓存并恢复本地配置；没有本地配置则继续等待，不执行巡检。常驻模式在当前扫描完成后切换并立即按新配置扫描；`-scan` 启动时限时同步，仍没有配置时返回 1。执行上报优先使用 root 服务的当前有效配置；仅在本地服务 socket 不可用时，root 才允许读取有效缓存直接上报，不进行 TCP 同步。服务明确拒绝请求时不绕过拒绝重试。切换配置会重新建立文件/进程基线，poll 模式的登录游标和命令游标沿用对应状态路径。
 
 本地 `config.age` 为可选巡检回退配置。前台和单次模式的配置主控优先级为启动参数、ANQUAN_MASTER、自动保存的连接地址；没有本地配置和保存地址时使用 `sa.sa.ops.tw`。仅本地巡检仍可独立运行。配置 TCP 与 YAML 的 UDP `server` 列表完全独立；UDP 也支持域名，例如 `server: [sa.sa.ops.tw:55555]`，裸域名或 IP 默认使用 UDP 55555。下发 YAML 的 server 列表可立即切换 UDP 目标，不影响配置 TCP 连接或自动识别的机器 IP。多个配置主控按连接列表顺序选择，数据向 server 中的全部地址上报；server: [] 仅关闭 UDP。普通 Nginx 中转不再覆盖新版 Agent 主动上报的本机 IP；主控连接来源字段仍显示中转地址。程序目录须允许写入配置缓存和连接信息。协议见 [Agent / Master 协议](docs/agent-master-protocol.md)。
 
@@ -72,7 +72,7 @@ Windows 本地演示使用相对路径、JSONL 模拟登录及独立输出目录
 
 ```sh
 go run ./cmd/anqu-build -config ./demo/config.yaml -output ./demo/anqu.exe -goos windows -goarch amd64
-./demo/anqu.exe
+./demo/anqu.exe -scan
 # 修改 demo/watched/app.conf 后再执行，查看 modified；第三次无修改则恢复 unchanged。
 ```
 
@@ -106,6 +106,7 @@ ProcessMonitoring:
 
 login:
   enabled: true
+  mode: trigger             # 默认按执行触发；每秒增量采集改为 poll
   source: journal
   journal_command: journalctl
   initial_lookback_hours: 24
@@ -179,20 +180,22 @@ FilesMonitoring:
 
 读取 `/proc` 不调用 shell 或 `ps`，排除当前 Agent 的 PID。没有 argv 的内核线程或僵尸进程以 `[comm]` 记录。扫描时进程正常退出会跳过；权限或读取错误使本轮进程模块失败并保留基线。
 
-## 每次成功 SSH 登录
+## 按执行触发或持续采集 SSH 登录
 
 新模式默认 `login.source: journal`，通过 `journalctl` 读取 sshd/sshd-session 的成功认证事件，记录每个事件的时间、用户、来源 IP、认证方式及可获得的终端。SSH 非交互命令同样可以从成功认证日志取得记录。认证行通常没有终端，此时明确记为 `N/A`，不猜测终端。
 
-首次从 `initial_lookback_hours` 指定的窗口开始，默认 24 小时；之后持久化 journal 游标。`max_records` 默认 1000，是每轮处理日志事件的页上限，不是只保留最后 1000 次登录；有积压时 `pending` 为真，后续轮次从下一事件继续。登录列表逐条写入 `ssh_login` 日志和可选 UDP；`login.record` 同时保留最近一次登录。
+`login.mode: trigger` 是 v0.6.8 默认方式：系统 sshrc、已安装路径无参数执行或显式 `-ssh-report` 发起一次请求，root 服务从有效配置的数据源查找匹配的真实认证记录，立即写入 `ssh_login` 并尝试 UDP 上报。同一会话执行两次会有两个独立 `id`，`trigger: execution` 和 `source_record_id` 分别标识执行来源和原认证记录，`invoked_at`、`executed_by` 保存请求时间与执行用户；`login_time` 仍是原认证时间。执行上报不运行完整巡检、不更新 `.logins` 或 Prom。数据源无匹配记录时返回错误，不用执行时间编造登录时间；默认常驻扫描不会再补发第三条登录。
+
+需要持续发现新登录时，明确设置 `login.mode: poll`。此模式保留 v0.6.7 行为：`login.poll_interval_ms` 默认 1000，允许 100–60000 毫秒，独立于完整巡检；首次从 `initial_lookback_hours` 指定的窗口开始，默认 24 小时，之后沿用加密 `.logins` 游标。`max_records` 默认 1000，是每页上限；有积压时连续读取下一页。新记录逐条写 `ssh_login`，`ssh_poll_complete` 保存本页发送结果，空轮询不逐秒写日志，错误查看 `ssh_login_error`。poll 模式拒绝执行上报请求，避免与增量采集重复发送。
 
 | 数据源 | 配置和边界 |
 |---|---|
 | `journal` | 需要可用的 `journalctl` 和读系统日志权限；日志保留周期必须覆盖 Agent 停机时间 |
 | `authlog` | `path: /var/log/auth.log` 或 `/var/log/secure`；解析 sshd 成功认证行，支持 RFC3339 或传统 syslog 时间 |
-| `jsonl` | 自定义每行一个成功登录对象；按记录去重并分页，首次读取文件内全部尚未记录的条目 |
+| `jsonl` | 自定义每行一个成功登录对象；trigger 查找匹配的真实记录，poll 按记录去重并分页 |
 | `wtmp` | `path: /var/log/wtmp`、`last_command: last`；需要支持 `--time-format iso` 的 util-linux last；只覆盖系统实际写入 wtmp 的会话 |
 
-`authlog` 保存文件前缀和字节偏移，并尝试从保留的未压缩 `path.*` 轮转文件续读；不读取 `.gz`、`.xz`、`.bz2`。初次只读取当前日志，丢失、截断或压缩掉续读所需文件会报错，不能保证补回已删除的事件。传统 syslog 没有年份和时区，按目标节点本地时区解释并处理跨年。`wtmp` 没有记录的非交互 SSH 无法靠它恢复，因此需要逐次 SSH 记录时使用 journal 或完整 authlog。
+poll 模式的 `authlog` 保存文件前缀和字节偏移，并尝试从保留的未压缩 `path.*` 轮转文件续读；不读取 `.gz`、`.xz`、`.bz2`。初次只读取当前日志，丢失、截断或压缩掉续读所需文件会报错，不能保证补回已删除的事件。传统 syslog 没有年份和时区，按目标节点本地时区解释并处理跨年。`wtmp` 没有记录的非交互 SSH 无法靠它恢复，因此生产 SSH 触发上报优先使用可读的 journal。
 
 JSONL 示例：
 
@@ -200,7 +203,7 @@ JSONL 示例：
 {"source_ip":"192.0.2.10","login_time":"2026-10-02T10:00:00+08:00","user":"ops","terminal":"pts/0"}
 ```
 
-时间必须包含时区，终端未知填 `N/A`；可额外提供稳定 `id` 和 `method`。格式错误或源读取失败时，不推进登录状态。切换登录源应先备份对应 `.logins` 状态，防止错用原游标。
+时间必须包含时区，终端未知填 `N/A`；可额外提供稳定 `id`、`method` 和 `source_port`。格式错误或源读取失败时，poll 不推进登录状态。poll 切换登录源应先备份对应 `.logins` 状态，防止错用原游标。
 
 ## 日志、状态和 Prometheus
 
@@ -267,7 +270,7 @@ history:
 
 同时填写 `server` 主控地址并以 `-service` 常驻运行。省略 `history` 或设置 `enabled: false` 可关闭采集。`timezone: Local` 按 Agent 主机本地时区解释日志中的时间，与脚本 `date` 一致；也可指定 `Asia/Shanghai` 等 IANA 时区。Web 按浏览器时区展示发生时间，保留独立的接收时间。
 
-首次从文件开头分批补传全部已有记录，每批最多 `max_records` 条（默认 100，允许 1–1000），有积压时连续读取。追平后默认每秒检查追加内容，独立于文件巡检周期和耗时。只从已保存的字节位置继续，内存与单批数据量相关，不随整个日志大小增长；文件末尾尚未写完的一行等待换行后再处理。无参数单次运行只处理一批，不适合持续实时采集。
+首次从文件开头分批补传全部已有记录，每批最多 `max_records` 条（默认 100，允许 1–1000），有积压时连续读取。追平后默认每秒检查追加内容，独立于文件巡检周期和耗时。只从已保存的字节位置继续，内存与单批数据量相关，不随整个日志大小增长；文件末尾尚未写完的一行等待换行后再处理。`-scan` 单次巡检只处理一批；持续实时采集使用 `-service`，SSH 执行上报入口不处理命令积压。
 
 日志格式为 `[YYYY-MM-DD HH:MM:SS] [用户] [终端] [命令]`。保留命令中的引号、空格和嵌套方括号，例如 `[[ -f ~/.bash_aliases ]]` 解析为命令 `[ -f ~/.bash_aliases ]`。同一秒执行两次相同命令也保留两条记录。Master 的“安全事件 → 操作命令”可按机器、时间、关键字筛选；详情显示用户、终端、来源日志和完整命令，该页每 2 秒刷新。正常命令只入库，不触发告警 webhook。
 
@@ -285,13 +288,13 @@ Agent 不修改、清空或轮转源日志，日志会按原脚本持续增大�
 
 主控 UDP 默认端口为 `55555`，开通相应 Agent 到各接收主控的网络即可。ip 使用 Agent 到配置主控的本机路由地址，所有 UDP 目标使用同一个识别结果；TCP 未识别时共用首个可用 UDP 路由地址。SSH 登录的 source_ip 仍是登录来源，与机器身份分开。机器以 IP 为主键，主控收到首次上报即自动创建；心跳只更新在线状态，不进入事件历史。当前心跳周期为 30 秒，连续超过 90 秒没有有效活动显示异常离线。
 
-每轮 `scan_summary` 包含巡检间隔 `interval_seconds`，与心跳的 30 秒周期分别保存。文件告警的 `target` 是文件路径或搜索规则，`before` / `after` 保留前后 MD5；成功登录事件保留来源 `source_ip`、实际 `login_time` 和稳定 `id`，外层 `time` 同样使用登录发生时间。
+每轮 `scan_summary` 包含巡检间隔 `interval_seconds`，与心跳的 30 秒周期分别保存。文件告警的 `target` 是文件路径或搜索规则，`before` / `after` 保留前后 MD5；成功登录事件保留来源 `source_ip` 和实际 `login_time`，外层 `time` 同样使用登录发生时间。trigger 每次执行生成独立 `id`，原认证标识另存 `source_record_id`；poll 使用稳定来源 ID 去重。
 
-同一报文重复提交保持 `event_id`；具有稳定来源 ID 的登录跨扫描重读也保持事件 ID，主控可以按机器 IP 与事件 ID 去重。持续缺失等告警在不同扫描轮次分别记录。巡检、登录和心跳采用 UDP 尽力发送，无确认或重传队列，发送成功只代表本机交给网络栈；统计和错误写入本轮日志。v0.6.0 的独立命令采集通道增加落库 ACK 和加密持久重试，读取错误日志与该通道独立。完整 JSON 示例、兼容规则和投递边界见 [协议文档](docs/agent-master-protocol.md)。
+同一报文重复提交保持 `event_id`；poll 登录跨扫描重读保持事件 ID，主控按机器 IP 与事件 ID 去重。trigger 两次执行有不同的事件 ID，即使 `source_record_id` 相同也分别入库并创建通知任务；同一执行请求的重复报文仍去重。持续缺失等告警在不同扫描轮次分别记录。巡检、登录和心跳采用 UDP 尽力发送，无确认或重传队列，发送成功只代表本机交给网络栈；统计和错误写入日志。v0.6.0 的独立命令采集通道增加落库 ACK 和加密持久重试，读取错误日志与该通道独立。完整 JSON 示例、兼容规则和投递边界见 [协议文档](docs/agent-master-protocol.md)。
 
 ## 运行和 systemd 部署
 
-节点只需对应架构的 Agent，不需 Go 或 YAML。Linux 从任意上传目录无参数执行时，Agent 自动创建 `/usr/local/anquan/` 及 `state/`、`logs/`、`textfile/`，将自身安装为 `/usr/local/anquan/anquan`，安装 SSH 入口和 `/etc/systemd/system/agent.service`，执行 `systemctl daemon-reload` 和 `systemctl enable --now agent.service` 后退出 0；服务在后台运行并开机启动。首次安装需要 root 和 systemd，失败会返回错误并保留安装进度，可重新执行程序重试。安装时会停止并禁用同目录已有的 agent.timer 和 anqu.timer，避免旧调度与常驻服务争抢。已安装路径的无参数执行保留单次巡检逻辑，不再次启停服务；`-service` 保留前台常驻方式。`-help`、`-version` 只查看信息，不执行安装。可选 `config.age`、平台缓存和连接文件只在目标不存在时从原程序旁复制，不覆盖已安装配置，不删除上传目录的源副本；旧连接 JSON 的加密迁移只处理固定运行目录。已有不同的同名服务文件先备份为 `.anquan.bak` 后替换，其它 drop-in 保留。
+节点只需对应架构的 Agent，不需 Go 或 YAML。Linux 从任意上传目录无参数执行时，Agent 自动创建 `/usr/local/anquan/` 及 `state/`、`logs/`、`textfile/`，将自身安装为 `/usr/local/anquan/anquan`，安装 SSH 入口和 `/etc/systemd/system/agent.service`，执行 `systemctl daemon-reload` 和 `systemctl enable --now agent.service` 后退出 0；服务在后台运行并开机启动。首次安装需要 root 和 systemd，失败会返回错误并保留安装进度，可重新执行程序重试。安装时会停止并禁用同目录已有的 agent.timer 和 anqu.timer，避免旧调度与常驻服务争抢。已安装路径无参数执行只请求一次 SSH 上报，不再次启停服务；完整单次巡检使用 `-scan`，`-service` 保留前台常驻方式。`-help`、`-version` 只查看信息，不执行安装。可选 `config.age`、平台缓存和连接文件只在目标不存在时从原程序旁复制，不覆盖已安装配置，不删除上传目录的源副本；旧连接 JSON 的加密迁移只处理固定运行目录。已有不同的同名服务文件先备份为 `.anquan.bak` 后替换，其它 drop-in 保留。
 
 将对应架构二进制传到新机器后，无需额外上传部署单元或配置环境变量：
 
@@ -311,9 +314,9 @@ sudo /usr/local/anquan/anquan -version
 /usr/local/anquan/anquan </dev/null >/dev/null 2>&1
 ```
 
-SSH 登录通过此入口执行一次 Agent；采集来源仍由有效配置的 `login` 设置决定。sshrc 按登录用户权限执行，非 root 可能无法读取 0600 配置或系统日志，完整登录采集依赖 root 常驻服务读取 journal/authlog。Agent 不修改 `sshd_config`；用户级 `~/.ssh/rc` 可能优先于系统 sshrc，目标机仍需验收登录事件。
+SSH 登录通过此入口请求一次上报；root 服务通过本地 Unix socket `/usr/local/anquan/.ssh-execution/agent.sock` 接收请求，依据内核提供的进程身份校验调用者并读取日志，因此 ubuntu 等普通用户无需读取 0600 配置。非 root 请求必须提供匹配的 SSH 连接上下文并通过 SSH 进程链验证；root 没有 `SSH_CONNECTION` 时可上报最近一条真实认证快照。仅 socket 不可用时允许 root 读取有效缓存直接上报，不做 TCP 同步。Agent 不修改 `sshd_config`；用户级 `~/.ssh/rc` 可能优先于系统 sshrc，目标机仍需验收登录事件。
 
-已有配置后，无参数默认静默执行一轮（不输出到终端，本地日志、上报和退出码保留），并在采集前发送一次启动心跳。首次显式指定 `-master` 但未取得有效配置的单次运行仍退出 1。`-service` 启动常驻循环，启动心跳发送后立即执行首轮采集，并按 `setup.interval_seconds` 周期执行，不重叠执行；单轮超过周期时跳过无法及时执行的节拍。常驻模式另有独立的 30 秒心跳，不受扫描周期或耗时影响。`-help`、`-version` 用于查看帮助和版本；没有节点 `-config`、`-check-config` 或导出配置接口。
+已安装路径无参数保持静默，等价于本次 `-ssh-report` 请求；成功返回 0，配置未应用、未开启 trigger、缺少 server 或无真实匹配记录返回 1。用 `sudo /usr/local/anquan/anquan -scan` 执行原完整巡检；它按原流程限时同步配置，并处理一批启用的 history。`-service` 启动常驻循环，启动心跳发送后立即执行首轮文件/进程采集，并按 `setup.interval_seconds` 周期执行，不重叠执行；单轮超过周期时跳过无法及时执行的节拍。常驻模式另有独立的 30 秒心跳和启用的 history 采集，均不受扫描周期影响。trigger 模式只响应执行请求；poll 模式额外启动增量登录 worker。`-service`、`-scan`、`-ssh-report` 不能混用。`-help`、`-version` 用于查看帮助和版本；没有节点 `-config`、`-check-config` 或导出配置接口。
 
 检查自动安装的常驻服务：
 
@@ -326,7 +329,7 @@ sudo journalctl -u agent.service -n 50 --no-pager
 
 服务单元使用 `Type=simple`、`Restart=on-failure`、`RestartSec=5`。常驻服务记录单轮错误并继续后续巡检；正常停止使用 `systemctl stop agent.service`。主控未下发配置时服务保持连接并等待，DNS 或主控暂时不可达时持续重连。
 
-如使用外部调度，改用附带的可选 oneshot/timer，不同时启用常驻服务：
+如使用外部调度，oneshot 的 `ExecStart` 必须显式带 `-scan`，再采用附带的可选 oneshot/timer，不同时启用常驻服务：
 
 ```sh
 sudo systemctl disable --now anqu.service
@@ -348,7 +351,7 @@ timer 在开机一分钟后启动，每次任务结束五分钟后再运行。�
 
 ## 基线、升级和验证
 
-文件/进程基线和登录游标只在详细日志和指标成功落盘后提交。每次启动，各文件/进程模块在自己的首次完整扫描且加密状态保存成功后启用新基线；扫描、输出或状态提交失败会在下一轮重试初始化。后续不完整扫描保留上次成功状态；一个模块采集失败不阻止其他成功模块产出结果。多个输出文件和状态不是同一事务，崩溃可能导致下轮重复记录，优先避免未记录就消费变化。
+完整巡检的文件/进程基线和 poll 登录游标只在详细日志和指标成功落盘后提交；独立 poll worker 在本地登录日志发布后提交共享游标，trigger 执行上报不修改该游标或指标。每次启动，各文件/进程模块在自己的首次完整扫描且加密状态保存成功后启用新基线；扫描、输出或状态提交失败会在下一轮重试初始化。后续不完整扫描保留上次成功状态；一个模块采集失败不阻止其他成功模块产出结果。多个输出文件和状态不是同一事务，崩溃可能导致下轮重复记录，优先避免未记录就消费变化。
 
 文件监控范围、已知 MD5 集合、输出/状态位置或进程白名单变更后，替换 `config.age` 并重启即可，无需手动删除旧文件/进程基线。首次扫描时命中已知 MD5 正常放行，未知 MD5 建立该路径的初始基线；必需进程规则仍立即检查。运行期间遇到状态认证失败会报告采集错误，不自动重置。
 

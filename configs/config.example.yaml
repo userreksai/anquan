@@ -56,8 +56,9 @@ history:
 
 login:
   enabled: true
+  mode: trigger              # v0.6.8 默认；已安装路径每次无参或 -ssh-report 请求一次真实登录上报
   source: journal            # journal（推荐）、authlog、jsonl、wtmp
-  poll_interval_ms: 1000     # v0.6.7 常驻模式每秒独立采集；100..60000，省略默认 1000
+  poll_interval_ms: 1000     # 仅 mode: poll 时每秒独立增量采集；100..60000，省略默认 1000
   journal_command: journalctl
   initial_lookback_hours: 24 # journal/authlog/wtmp 初次回看时长
   timeout_seconds: 10
@@ -65,10 +66,14 @@ login:
   # authlog: source 改为 authlog，path 改为 /var/log/auth.log 或 /var/log/secure
   # jsonl: source 改为 jsonl，path 填每行一条成功登录记录的 JSONL 文件
   # wtmp: source 改为 wtmp，path 填 /var/log/wtmp，last_command 填 last
+  # trigger 不消费 .logins，不修改 Prom；同一会话每次执行有独立事件 ID。
+  # 非 root 经 root agent.service 的 Unix IPC 上报，无须读取 0600 配置；必须有匹配的 SSH 上下文。
+  # root 无 SSH_CONNECTION 可上报最近真实认证快照；无真实记录时失败，不编造登录时间。
+  # 需要 v0.6.7 每秒增量去重行为时明确改为 mode: poll；此模式拒绝执行上报，避免双发。
   # path: /var/log/auth.log
   # last_command: last
 
-# 默认只生成本地通知/日志/指标；主控 UDP 默认监听 55555。
+# 完整巡检默认生成本地日志/指标；SSH 执行上报必须配置非空 server。主控 UDP 默认监听 55555。
 # TCP 配置地址由自动服务固定为 sa.sa.ops.tw（默认 55556），前台仍支持 -master/ANQUAN_MASTER；不使用本列表。
 # 下发可修改本 UDP 列表；server: [] 只关闭数据上报，仍可接收配置。
 # 无分配且无本地文件时保持等待，不巡检；不需要 agent_ip。
@@ -83,8 +88,10 @@ server: []
 setup:
   logs: /var/log/时间anquan.log
   prom: /var/lib/node_exporter/textfile_collector/process_monitor.prom
-  interval_seconds: 300     # -service 完整文件/进程巡检周期；SSH 使用 login.poll_interval_ms
-# SSH 沿用已有 .logins 游标，升级无需删除状态；每秒采集不保证机器人消息每秒送达。
+  interval_seconds: 300     # -service 完整文件/进程巡检周期；trigger 不因巡检额外补发 SSH
+# mode: poll 才使用 login.poll_interval_ms 并沿用 .logins 游标；升级无需删除状态。
+# 已安装路径无参/-ssh-report 只触发上报，原完整单次巡检改用 -scan；旧两行 ssh-init.sh 无须修改。
+# 执行上报优先使用 root 服务配置，仅 socket 不可用时 root 可读有效缓存直接上报，不做 TCP 同步。
 # SSH UDP 上报仍为尽力发送；通知另受 Master 入库、机器人网络和接收端响应耗时影响。
 # logs 的“时间”或 {date} 替换为北京时间 YYYYMMDD，零点换新文件。
 # prom 每轮原子覆盖同一个文件，不添加时间前缀；旧文件名中的“时间”/{date}/{time} 会被移除。
