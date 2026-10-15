@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -57,13 +58,6 @@ func runWithWriter(c Config, writer io.Writer, startupHeartbeat bool) (r Report,
 	var next *baseline
 	r.MD5, next, issues = collectMD5(c, r.StartedAt)
 	r.Errors = append(r.Errors, issues...)
-	var loginNext *loginBaseline
-	if c.MonitoringMode() || c.Login.Source == "journal" || c.Login.Source == "authlog" {
-		r.Login, loginNext, issues = collectSSHLogins(c, r.StartedAt)
-	} else {
-		r.Login, issues = collectLogin(c.Login, c.location)
-	}
-	r.Errors = append(r.Errors, issues...)
 	r.Existence, issues = collectExistence(c.Existence)
 	r.Errors = append(r.Errors, issues...)
 	var filesNext *filesBaseline
@@ -71,6 +65,25 @@ func runWithWriter(c Config, writer io.Writer, startupHeartbeat bool) (r Report,
 	r.Errors = append(r.Errors, issues...)
 	var processNext *processBaseline
 	r.Processes, processNext, issues = collectProcessMonitoring(c, r.StartedAt)
+	r.Errors = append(r.Errors, issues...)
+	// Only the short login transaction shares the realtime worker's lock.
+	// Hashing files and enumerating processes must not delay SSH collection.
+	var loginNext *loginBaseline
+	if c.MonitoringMode() || c.realtimeLogin || c.Login.Source == "journal" || c.Login.Source == "authlog" {
+		if c.Login.Enabled {
+			unlockLogin, err := lockSSHLoginState(context.Background(), c)
+			if err != nil {
+				return r, paths, err
+			}
+			defer unlockLogin()
+			if err := protectLegacyState(c.StateFile+".logins", "login"); err != nil {
+				return r, paths, err
+			}
+		}
+		r.Login, loginNext, issues = collectSSHLogins(c, time.Now().In(c.location))
+	} else {
+		r.Login, issues = collectLogin(c.Login, c.location)
+	}
 	r.Errors = append(r.Errors, issues...)
 	r.Alerts = append(r.Alerts, r.Files.Alerts...)
 	r.Alerts = append(r.Alerts, r.Processes.Alerts...)

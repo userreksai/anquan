@@ -76,7 +76,7 @@ func TestSessionMigratesEveryLegacyStateIncludingDisabledModules(t *testing.T) {
 		}
 	}
 	entries, err := os.ReadDir(filepath.Dir(c.StateFile))
-	if err != nil || len(entries) != 5 { // Four encrypted states and one empty lock.
+	if err != nil || len(entries) != 6 { // Four encrypted states and two empty resource locks.
 		t.Fatalf("unexpected plaintext backup/key/temp file: %v %v", entries, err)
 	}
 }

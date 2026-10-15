@@ -7,6 +7,10 @@ Agent 向主控 `55555/udp` 发送 UTF-8 JSON，每个数据报是一条完整�
 ```yaml
 server:
   - 172.22.0.100:55555
+login:
+  enabled: true
+  source: journal
+  poll_interval_ms: 1000
 setup:
   interval_seconds: 300
 ```
@@ -71,7 +75,7 @@ Linux 新机器从上传目录无参数执行会完成安装并启动后台服�
 每帧是 UTF-8 JSON 加换行（NDJSON），最大 8 MiB，`version: 1`。JSON 字符串内的 age 密文换行使用 JSON 转义。第一帧：
 
 ```json
-{"version":1,"type":"hello","ip":"172.22.0.27","reported_ip":"172.22.0.27","host":"node-a","agent_version":"0.6.6"}
+{"version":1,"type":"hello","ip":"172.22.0.27","reported_ip":"172.22.0.27","host":"node-a","agent_version":"0.6.7"}
 ```
 
 本机模式省略 discover_ip（false），`ip` 与 `reported_ip` 必须是同一规范化本机 IP。旧 Master 已支持显式 hello.ip，因此不识别新增字段时仍按本机 IP 登记，并直接发送配置；新版 Master 识别 reported_ip 后先确认身份再发送最新分配：
@@ -88,7 +92,7 @@ Agent 在发送 hello 前先加密保存本机地址并更新共享身份。新�
 {"version":1,"type":"config","revision":"<密文完整字节的SHA-256十六进制>","ciphertext":"-----BEGIN AGE ENCRYPTED FILE-----\n..."}
 ```
 
-Agent 先验证 revision、age 完整性和节点平台的 YAML 配置，再原子保存程序旁的 `config.master.age`。常驻模式等待当前扫描结束，停止旧心跳/命令采集工作、切换到新配置并重启相应工作后才确认成功：
+Agent 先验证 revision、age 完整性和节点平台的 YAML 配置，再原子保存程序旁的 `config.master.age`。常驻模式等待当前扫描结束，停止旧心跳、SSH 和命令采集工作、切换到新配置并重启相应工作后才确认成功：
 
 ```json
 {"version":1,"type":"ack","revision":"<当前版本>"}
@@ -129,7 +133,7 @@ Agent 每 30 秒发送 `{"version":1,"type":"ping"}`，主控回复 `{"version":
 }
 ```
 
-这里的 `interval_seconds` 是 Agent 常驻服务的扫描周期，默认 300 秒，与独立心跳的 30 秒分别保存。`collection_success` 仅表示采集完成，异常文件或缺失进程也可以是有效检测结果；应同时查看 `alerts` 与 `errors`。主控接纳乱序的心跳、告警、登录报文，旧扫描摘要不会覆盖新的摘要或心跳周期。
+这里的 `interval_seconds` 是 Agent 常驻服务完整文件/进程巡检周期，默认 300 秒；独立心跳为 30 秒，v0.6.7 的 SSH 独立采集由 `login.poll_interval_ms` 控制，默认 1000 毫秒。独立 SSH 采集的新增记录不要求计入每次完整巡检摘要，不能仅凭摘要中 `logins=0` 判断没有 SSH 上报。`collection_success` 仅表示采集完成，异常文件或缺失进程也可以是有效检测结果；应同时查看 `alerts` 与 `errors`。主控接纳乱序的心跳、告警、登录报文，旧扫描摘要不会覆盖新的摘要或心跳周期。
 
 ## 文件等通用告警
 
@@ -156,6 +160,8 @@ Agent 每 30 秒发送 `{"version":1,"type":"ping"}`，主控回复 `{"version":
 
 ## 每次 SSH 成功登录
 
+v0.6.7 常驻模式按 `login.poll_interval_ms` 独立采集成功登录，不等待默认 300 秒的完整巡检。范围为 100–60000 毫秒，旧配置省略时默认 1000；`login.enabled: false` 关闭采集。采集后立即尝试发送以下原有 `ssh_login` 数据报，协议 `version: 1` 和事件字段保持兼容。无参数单次执行仍只采集一次。
+
 ```json
 {
   "version": 1,
@@ -176,6 +182,8 @@ Agent 每 30 秒发送 `{"version":1,"type":"ping"}`，主控回复 `{"version":
 ```
 
 `ip` 是被登录机器，`source_ip` 是登录来源，两者不可混用。来源没有终端时 `terminal` 为 `N/A`。生产默认读取 journal 成功认证记录，支持非交互 SSH；wtmp 只能覆盖操作系统写入的会话。
+
+独立采集继续使用已有加密 `.logins` 游标和稳定 `event_id`，升级无需删除状态；相同来源记录 ID 的登录继续去重，不会因轮询变快重发旧登录。有新增登录时，Agent 本机 `ssh_poll_complete` 日志保存本页新增记录数和 UDP 发送结果，逐条记录仍写 `ssh_login`；空闲轮询不逐秒写日志，错误查看 `ssh_login_error`。每秒是采集节奏，最终机器人通知还受系统日志写入、UDP 网络、Master 入库与接收端响应耗时影响。
 
 Master v0.6.0 将新入库的 `ssh_login` 与通知任务在同一事务提交，向全部已启用 webhook 发送登录通知。正文保留机器、主机名、用户、来源 IP、终端、认证方式、真实登录时间和事件 ID。重复事件及相同来源 ID 的登录不重复入队，数据库中已有历史记录不补发；补读/延迟上报的登录首次入库时仍通知。通知失败沿用持久重试，重启后继续发送。
 
@@ -218,6 +226,6 @@ Master v0.6.0 将新入库的 `ssh_login` 与通知任务在同一事务提交�
 
 ## 重复、持久化与投递边界
 
-同一报告构造相同的事件 ID，多个 UDP 副本按 `(ip,event_id)` 去重。登录使用机器 IP、主机名、事件类型与来源记录 `id` 生成标识，同一登录跨扫描重新读取保持相同标识；不同来源 ID 的两次登录即使用户/IP/时间完全相同也会分别保留。没有来源 ID 的兼容记录按其原始时间和内容生成标识。告警与摘要按扫描时间和内容生成标识，持续缺失在下轮仍产生新记录；文件变化因本地发布失败而跨轮重新检测，也可能形成新的告警观察记录。
+同一报告构造相同的事件 ID，多个 UDP 副本按 `(ip,event_id)` 去重。登录使用机器 IP、主机名、事件类型与来源记录 `id` 生成标识，同一登录跨完整巡检或独立轮询重新读取保持相同标识；不同来源 ID 的两次登录即使用户/IP/时间完全相同也会分别保留。没有来源 ID 的兼容记录按其原始时间和内容生成标识。告警与摘要按扫描时间和内容生成标识，持续缺失在下轮仍产生新记录；文件变化因本地发布失败而跨轮重新检测，也可能形成新的告警观察记录。
 
 常规巡检告警、登录、摘要和心跳的 Agent → Master 传输没有 ACK 或持久重传。成功发送只表示本地网络栈接受，不代表主控已存储；网络丢包、主控停机或超大数据报可能导致缺记录。命令采集通道采用上述落库确认及持久重试。Master → webhook 的告警及登录通知在入库后采用持久重试，重复事件不重复入队。

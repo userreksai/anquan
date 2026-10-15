@@ -1,6 +1,8 @@
-# Anqu 安全检测 Agent（v0.6.6）
+# Anqu 安全检测 Agent（v0.6.7）
 
 Anqu 在 Linux 节点持续检查文件 MD5、文件增删和进程变化，并逐条记录成功的 SSH 登录。服务启动时记录当前时间，每轮将当前主机的完整检测结果和告警写入日志，并更新固定路径的 Prometheus 文件。运行日志按北京时间零点切换文件，不再生成时间戳命名的单轮 JSON 报告。
+
+v0.6.7 常驻服务独立采集 SSH 登录，`login.poll_interval_ms` 默认 1000 毫秒，不等待默认 300 秒的文件/进程完整巡检。旧配置省略新字段也默认每秒采集，升级沿用已有 `.logins` 游标。
 
 本目录是 [anquan Agent](https://github.com/userreksai/anquan)。新机器自动连接固定主控域名 `sa.sa.ops.tw:55556/TCP` 接收配置，通过配置中的 UDP `server` 列表向 [Master 主控](https://github.com/userreksai/anquan-server-master) 上报；UDP 默认关闭。详细需求对应关系见 [需求与实现说明](docs/需求与实现说明.md)，字段约定见 [Agent / Master 协议](docs/agent-master-protocol.md)。
 

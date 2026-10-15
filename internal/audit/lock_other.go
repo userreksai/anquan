@@ -12,6 +12,9 @@ import (
 // Portable fallback for local development. Linux and Windows use OS file locks.
 func lockState(path string) (func(), error) {
 	if err := os.Mkdir(path, 0700); err != nil {
+		if os.IsExist(err) {
+			return nil, fmt.Errorf("cannot lock %s: %w", path, errStateLockBusy)
+		}
 		return nil, fmt.Errorf("cannot lock %s: %w", path, err)
 	}
 	var once sync.Once

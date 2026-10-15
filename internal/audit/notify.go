@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -108,16 +109,29 @@ func notifyServers(c Config, r Report) []NotificationResult {
 }
 
 func sendUDP(c Config, messagesForIP func(string) ([][]byte, error)) []NotificationResult {
+	return sendUDPContext(context.Background(), c, messagesForIP)
+}
+
+func sendUDPContext(ctx context.Context, c Config, messagesForIP func(string) ([][]byte, error)) []NotificationResult {
 	results := []NotificationResult{}
+	dialer := net.Dialer{Timeout: 2 * time.Second}
 	for _, endpoint := range c.Server {
+		if err := ctx.Err(); err != nil {
+			results = append(results, NotificationResult{Server: endpoint, Error: err.Error()})
+			break
+		}
 		result := NotificationResult{Server: endpoint}
-		conn, err := net.DialTimeout("udp", endpoint, 2*time.Second)
+		conn, err := dialer.DialContext(ctx, "udp", endpoint)
 		if err == nil {
+			stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 			result.IP = c.udpReportedIP(conn.LocalAddr())
 			var messages [][]byte
 			messages, err = messagesForIP(result.IP)
 			if err == nil {
 				for _, b := range messages {
+					if err = ctx.Err(); err != nil {
+						break
+					}
 					if len(b) > 60000 {
 						err = fmt.Errorf("UDP event exceeds 60000 bytes; complete event retained in local log/report")
 						break
@@ -131,7 +145,8 @@ func sendUDP(c Config, messagesForIP func(string) ([][]byte, error)) []Notificat
 					result.Sent++
 				}
 			}
-			conn.Close()
+			stop()
+			_ = conn.Close()
 		}
 		if err != nil {
 			result.Error = err.Error()

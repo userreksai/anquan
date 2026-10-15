@@ -43,6 +43,9 @@ func lockState(path string) (func(), error) {
 	runtime.KeepAlive(f)
 	if ok == 0 {
 		_ = f.Close()
+		if callErr == syscall.Errno(33) { // ERROR_LOCK_VIOLATION
+			return nil, fmt.Errorf("another run holds %s: %w", path, errStateLockBusy)
+		}
 		return nil, fmt.Errorf("another run holds %s (or locking failed): %w", path, callErr)
 	}
 	// Windows releases this lock if the process exits, including forced termination.

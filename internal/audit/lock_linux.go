@@ -3,6 +3,7 @@
 package audit
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -35,6 +36,9 @@ func lockService(path string) (func(), error) {
 func lockLinuxFile(f *os.File, path string) (func(), error) {
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, fmt.Errorf("another run holds %s: %w", path, errStateLockBusy)
+		}
 		return nil, fmt.Errorf("another run holds %s (or locking failed): %w", path, err)
 	}
 	var once sync.Once
