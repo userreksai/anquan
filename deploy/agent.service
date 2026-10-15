@@ -9,8 +9,8 @@ Type=simple
 User=root
 UMask=0022
 WorkingDirectory=/usr/local/anquan
-Environment=ANQUAN_MASTER=sa.sa.ops.tw
-ExecStart=/usr/local/anquan/anquan -service -master sa.sa.ops.tw
+Environment=ANQUAN_MASTER=172.22.0.27
+ExecStart=/usr/local/anquan/anquan -service -master 172.22.0.27
 Restart=on-failure
 RestartSec=5
 LimitCORE=0

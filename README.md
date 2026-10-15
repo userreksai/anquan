@@ -4,7 +4,7 @@ Anqu 在 Linux 节点持续检查文件 MD5、文件增删和进程变化，并�
 
 v0.6.8 默认 `login.mode: trigger`：已安装路径每次无参数执行立即请求上报一次真实 SSH 登录，同一会话连续执行也生成独立事件，服务巡检不会额外补发登录。原有两行 `ssh-init.sh` 保持兼容。需要 v0.6.7 的每秒增量采集和跨轮去重时，明确设置 `login.mode: poll`；完整文件/进程巡检仍默认每 300 秒运行。
 
-本目录是 [anquan Agent](https://github.com/userreksai/anquan)。新机器自动连接固定主控域名 `sa.sa.ops.tw:55556/TCP` 接收配置，通过配置中的 UDP `server` 列表向 [Master 主控](https://github.com/userreksai/anquan-server-master) 上报；UDP 默认关闭。详细需求对应关系见 [需求与实现说明](docs/需求与实现说明.md)，字段约定见 [Agent / Master 协议](docs/agent-master-protocol.md)。
+本目录是 [anquan Agent](https://github.com/userreksai/anquan)。新机器自动连接固定主控地址 `172.22.0.27:55556/TCP` 接收配置，通过配置中的 UDP `server` 列表向 [Master 主控](https://github.com/userreksai/anquan-server-master) 上报；UDP 默认关闭。详细需求对应关系见 [需求与实现说明](docs/需求与实现说明.md)，字段约定见 [Agent / Master 协议](docs/agent-master-protocol.md)。
 
 配套主控与 Vue 前端的安装、端口、默认登录和密码重置见 [安全中心主控部署](docs/主控部署.md)。
 
@@ -27,19 +27,19 @@ sudo systemctl status agent.service --no-pager
 sudo journalctl -u agent.service -n 50 --no-pager
 ```
 
-自动生成的 `agent.service` 固定使用 `sa.sa.ops.tw`，不带端口默认连接 **55556/TCP**。前台和单次模式仍支持 `-master` / `ANQUAN_MASTER`，接受域名、IP、显式端口和逗号分隔的配置主控列表；填写主机名，不带 `http://`、路径或 `/`。域名保留在连接设置中，每次建立连接时解析，DNS 暂时不可用不会阻止服务安装。此地址不取自 YAML 的 `server`，也不覆盖 UDP 上报列表。Agent 不监听端口；首次没有配置或 Master 离线时保持运行并重连，收到有效配置后自动开始采集。
+自动生成的 `agent.service` 固定使用 `172.22.0.27`，不带端口默认连接 **55556/TCP**。前台和单次模式仍支持 `-master` / `ANQUAN_MASTER`，接受域名、IP、显式端口和逗号分隔的配置主控列表；填写 IP 或主机名，不带 `http://`、路径或 `/`。默认使用固定 IP；显式指定域名时，域名保留在连接设置中，每次建立连接时解析，DNS 暂时不可用不会阻止服务安装。此地址不取自 YAML 的 `server`，也不覆盖 UDP 上报列表。Agent 不监听端口；首次没有配置或 Master 离线时保持运行并重连，收到有效配置后自动开始采集。
 
 v0.6.6 从已建立的 TCP 连接读取操作系统为该路由选定的本机网卡 IP，握手主动上报，并用于全部 UDP 主控；例如 Agent 为 `172.22.0.27`、Nginx 中转为 `172.22.240.6` 时，机器身份使用 `172.22.0.27`，主控另存中转地址为连接来源。无需修改 Nginx、查询公网服务、按主机名推断 IP，或填写 `agent_ip` / `ANQUAN_AGENT_IP`。IPv4、IPv6 均支持，排除回环、链路本地、未指定和组播地址。多网卡按到配置主控的实际路由选取；尚无 TCP 身份时，由首个可用 UDP 路由选取，并在同一进程的心跳、扫描、登录和命令上报间共享，随后以 TCP 路由更新。仅回环连接或无法取得可用本机地址时保留旧来源识别回退；仍无身份时 UDP ip 为空，由接收端按来源登记。机器仍以 IP 为主键，不同网络中重复的私网 IP 需要另行规划。
 
-自动单元在 `[Service]` 中设置 `Environment=ANQUAN_MASTER=sa.sa.ops.tw`，并通过 `ExecStart=/usr/local/anquan/anquan -service -master sa.sa.ops.tw` 固定连接域名。原有 `master.conf` 的环境变量不能覆盖这个启动参数；已有其它 systemd drop-in 保留，升级旧机器时须核对是否覆盖了 `ExecStart`。仓库的 `deploy/agent.service` 与自动安装单元一致；旧 `deploy/anqu.service` 仍供手工部署使用。
+自动单元在 `[Service]` 中设置 `Environment=ANQUAN_MASTER=172.22.0.27`，并通过 `ExecStart=/usr/local/anquan/anquan -service -master 172.22.0.27` 固定连接主控 IP。原有 `master.conf` 的环境变量不能覆盖这个启动参数；已有其它 systemd drop-in 保留，升级旧机器时须核对是否覆盖了 `ExecStart`。仓库的 `deploy/agent.service` 与自动安装单元一致；旧 `deploy/anqu.service` 仍供手工部署使用。
 
-Agent 自动将主控地址和机器标识加密保存为 `/usr/local/anquan/agent.connection.age`，无需手工创建；v3 元数据分别记录 `local_ip` 和兼容回退的 `observed_ip`，重启仅恢复仍属于本机网卡的 `local_ip`，不把旧观察到的代理地址恢复为身份。旧 v1/v2 文件自动迁移，旧 `agent.connection.json` 成功加密迁移后删除。默认域名内置为 `sa.sa.ops.tw`，解析后的主控 IP 不固定在程序中。此后执行 `/usr/local/anquan/anquan` 或 `-ssh-report` 会向 root 服务请求本次 SSH 上报；每次执行使用新的事件 ID，不运行文件/进程巡检，也不消费 `.logins` 游标。root 未保留 `SSH_CONNECTION` 时可以请求最近一条真实认证快照；普通用户必须来自可验证的 SSH 上下文。完整单次巡检改用 `-scan`。等待配置的常驻服务保持 TCP hello/ping 在线，首次配置到达前不采集登录，也不接受无有效配置的执行上报。
+Agent 自动将主控地址和机器标识加密保存为 `/usr/local/anquan/agent.connection.age`，无需手工创建；v3 元数据分别记录 `local_ip` 和兼容回退的 `observed_ip`，重启仅恢复仍属于本机网卡的 `local_ip`，不把旧观察到的代理地址恢复为身份。旧 v1/v2 文件自动迁移，旧 `agent.connection.json` 成功加密迁移后删除。默认主控 IP 内置为 `172.22.0.27`。此后执行 `/usr/local/anquan/anquan` 或 `-ssh-report` 会向 root 服务请求本次 SSH 上报；每次执行使用新的事件 ID，不运行文件/进程巡检，也不消费 `.logins` 游标。root 未保留 `SSH_CONNECTION` 时可以请求最近一条真实认证快照；普通用户必须来自可验证的 SSH 上下文。完整单次巡检改用 `-scan`。等待配置的常驻服务保持 TCP hello/ping 在线，首次配置到达前不采集登录，也不接受无有效配置的执行上报。
 
 在“管理设置 → Age 配置加密”编辑 YAML，点击“下发配置”，选择目标机器并确认。Master 按机器保存加密配置，在线机器通过现有长连接接收；离线机器重连后自动接收。页面显示待下发、已应用或应用失败，已应用以 Agent 完成校验、保存和切换后的确认消息为准。非法 YAML 或无法应用的配置不会覆盖 Agent 当前有效配置。
 
 主控下发的配置以 `config.master.age` 原子保存在 Agent 可执行文件旁，优先于本地 `config.age`；重启或主控暂时不可达时仍使用有效缓存，无需补建本地配置。主控明确返回未给本机分配配置时，Agent 清除主控缓存并恢复本地配置；没有本地配置则继续等待，不执行巡检。常驻模式在当前扫描完成后切换并立即按新配置扫描；`-scan` 启动时限时同步，仍没有配置时返回 1。执行上报优先使用 root 服务的当前有效配置；仅在本地服务 socket 不可用时，root 才允许读取有效缓存直接上报，不进行 TCP 同步。服务明确拒绝请求时不绕过拒绝重试。切换配置会重新建立文件/进程基线，poll 模式的登录游标和命令游标沿用对应状态路径。
 
-本地 `config.age` 为可选巡检回退配置。前台和单次模式的配置主控优先级为启动参数、ANQUAN_MASTER、自动保存的连接地址；没有本地配置和保存地址时使用 `sa.sa.ops.tw`。仅本地巡检仍可独立运行。配置 TCP 与 YAML 的 UDP `server` 列表完全独立；UDP 也支持域名，例如 `server: [sa.sa.ops.tw:55555]`，裸域名或 IP 默认使用 UDP 55555。下发 YAML 的 server 列表可立即切换 UDP 目标，不影响配置 TCP 连接或自动识别的机器 IP。多个配置主控按连接列表顺序选择，数据向 server 中的全部地址上报；server: [] 仅关闭 UDP。普通 Nginx 中转不再覆盖新版 Agent 主动上报的本机 IP；主控连接来源字段仍显示中转地址。程序目录须允许写入配置缓存和连接信息。协议见 [Agent / Master 协议](docs/agent-master-protocol.md)。
+本地 `config.age` 为可选巡检回退配置。前台和单次模式的配置主控优先级为启动参数、ANQUAN_MASTER、自动保存的连接地址；没有本地配置和保存地址时使用 `172.22.0.27`。仅本地巡检仍可独立运行。配置 TCP 与 YAML 的 UDP `server` 列表完全独立；UDP 支持 IP 和域名，例如 `server: [172.22.0.27:55555]`，裸域名或 IP 默认使用 UDP 55555。下发 YAML 的 server 列表可立即切换 UDP 目标，不影响配置 TCP 连接或自动识别的机器 IP。多个配置主控按连接列表顺序选择，数据向 server 中的全部地址上报；server: [] 仅关闭 UDP。普通 Nginx 中转不再覆盖新版 Agent 主动上报的本机 IP；主控连接来源字段仍显示中转地址。程序目录须允许写入配置缓存和连接信息。协议见 [Agent / Master 协议](docs/agent-master-protocol.md)。
 
 构建机需要 Go 1.25 或更新版本。首次构建会下载 age 和 YAML 依赖。
 
@@ -280,7 +280,7 @@ Agent 不修改、清空或轮转源日志，日志会按原脚本持续增大�
 
 ## UDP 主控接口
 
-`server: []` 不发送 UDP 数据，仍保持已配置的 TCP 配置连接。`server: [sa.sa.ops.tw,192.168.0.2]` 是正确的多主控格式，裸域名或 IP 使用 UDP 55555；也支持 `域名:端口`、`IP:端口` 和 `[IPv6]:端口`。Agent 向全部列表地址发送心跳、扫描摘要、告警、SSH 登录及启用的命令记录，常驻时每 30 秒独立发送 UDP 心跳。
+`server: []` 不发送 UDP 数据，仍保持已配置的 TCP 配置连接。`server: [172.22.0.27,192.168.0.2]` 是正确的多主控格式，裸域名或 IP 使用 UDP 55555；也支持 `域名:端口`、`IP:端口` 和 `[IPv6]:端口`。Agent 向全部列表地址发送心跳、扫描摘要、告警、SSH 登录及启用的命令记录，常驻时每 30 秒独立发送 UDP 心跳。
 
 ```json
 {"version":1,"event_id":"唯一事件摘要","ip":"172.22.0.101","host":"node-a","time":"2026-10-02T10:00:00+08:00","type":"alert","data":{"module":"files","kind":"missing","target":"/etc/ssh/sshrc","message":"configured file or directory does not exist"}}
@@ -303,7 +303,7 @@ v0.6.5 支持直接将上传文件命名为 `/usr/local/anquan` 并执行：当�
 ```sh
 chmod 0700 ./anqu-linux-amd64
 sudo ./anqu-linux-amd64
-# 安装并在后台启动 agent.service，连接 sa.sa.ops.tw:55556/TCP。
+# 安装并在后台启动 agent.service，连接 172.22.0.27:55556/TCP。
 sudo /usr/local/anquan/anquan -version
 ```
 

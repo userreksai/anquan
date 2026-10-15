@@ -33,11 +33,11 @@ func TestRemoteBootstrapWithoutLocalConfig(t *testing.T) {
 	}
 }
 
-func TestFreshBootstrapUsesDefaultDomainAndPreservesConnectionPriority(t *testing.T) {
+func TestFreshBootstrapUsesDefaultAddressAndPreservesConnectionPriority(t *testing.T) {
 	base := t.TempDir()
 	cfg, err := BootstrapConfig(Config{}, base, "")
 	if err != nil || !cfg.WaitingForConfig() || len(cfg.masters) != 1 || cfg.masters[0] != defaults.MasterAddress+":55556" || len(cfg.Server) != 0 || cfg.reportedIP() != "" {
-		t.Fatalf("fresh bootstrap lost its default domain or set UDP/identity: %+v %v", cfg, err)
+		t.Fatalf("fresh bootstrap lost its default address or set UDP/identity: %+v %v", cfg, err)
 	}
 	cfg, err = BootstrapConfig(Config{}, base, "primary.example.invalid:55557,192.0.2.7")
 	if err != nil {

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"anqu/internal/audit"
+	"anqu/internal/defaults"
 	"anqu/internal/install"
 	"anqu/internal/sealed"
 )
@@ -123,7 +124,7 @@ func TestAgentHelpAndVersionDoNotLoadConfig(t *testing.T) {
 		if arg == "-version" && stdout.String() != "anqu "+version+"\n" {
 			t.Fatal("unexpected version output")
 		}
-		if arg == "-help" && (!strings.Contains(stderr.String(), "sa.sa.ops.tw") || !strings.Contains(stderr.String(), "agent.service")) {
+		if arg == "-help" && (!strings.Contains(stderr.String(), defaults.MasterAddress) || !strings.Contains(stderr.String(), "agent.service")) {
 			t.Fatal("help omits the fixed-domain service installation")
 		}
 	}
