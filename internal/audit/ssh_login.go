@@ -301,11 +301,15 @@ func parseAcceptedSSH(message string, at time.Time, id string) (*LoginRecord, er
 	if net.ParseIP(m[3]) == nil {
 		return nil, fmt.Errorf("SSH accepted login has invalid source IP %q", m[3])
 	}
+	port, err := strconv.Atoi(m[4])
+	if err != nil || port < 1 || port > 65535 {
+		return nil, fmt.Errorf("SSH accepted login has invalid source port %q", m[4])
+	}
 	terminal := "N/A"
 	if tty := sshTerminal.FindStringSubmatch(message); tty != nil {
 		terminal = tty[1]
 	}
-	return &LoginRecord{ID: id, Method: m[1], User: m[2], SourceIP: m[3], LoginTime: at, Terminal: terminal}, nil
+	return &LoginRecord{ID: id, Method: m[1], User: m[2], SourceIP: m[3], SourcePort: port, LoginTime: at, Terminal: terminal}, nil
 }
 
 type authLogFile struct {

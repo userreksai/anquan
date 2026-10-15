@@ -35,6 +35,7 @@ type Config struct {
 	session           *baselineSession
 	waitingForConfig  bool
 	realtimeLogin     bool
+	runtimeDir        string
 	masters           []string
 	identity          *agentIdentity
 }
@@ -52,6 +53,7 @@ type MD5Config struct {
 
 type LoginConfig struct {
 	Enabled              bool   `json:"enabled" yaml:"enabled"`
+	Mode                 string `json:"mode" yaml:"mode"`
 	Source               string `json:"source" yaml:"source"`
 	Path                 string `json:"path" yaml:"path"`
 	LastCommand          string `json:"last_command" yaml:"last_command"`
@@ -262,6 +264,7 @@ func validUNC(p string) bool {
 }
 
 func normalizeConfig(c Config, base string, rules pathRules) (Config, error) {
+	c.runtimeDir = base
 	resolveField := func(field, base string, p *string) error {
 		if strings.TrimSpace(*p) == "" {
 			return fmt.Errorf("%s cannot be empty", field)
@@ -317,6 +320,12 @@ func normalizeConfig(c Config, base string, rules pathRules) (Config, error) {
 		}
 	}
 	if c.Login.Enabled {
+		if c.Login.Mode == "" {
+			c.Login.Mode = "trigger"
+		}
+		if c.Login.Mode != "trigger" && c.Login.Mode != "poll" {
+			return c, fmt.Errorf("login.mode must be trigger or poll")
+		}
 		if c.Login.PollIntervalMS == 0 {
 			c.Login.PollIntervalMS = 1000
 		}

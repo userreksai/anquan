@@ -18,7 +18,7 @@ import (
 	"anqu/internal/sealed"
 )
 
-const version = "0.6.7"
+const version = "0.6.8"
 
 func main() {
 	os.Exit(runPrepared(os.Args[1:], os.Stdout, os.Stderr, sealed.Config, os.Executable, install.Prepare))
@@ -27,13 +27,19 @@ func main() {
 // Agent nodes bootstrap from deployment settings or optional config.age.
 // Single checks keep local logs without terminal output; services also log to stdout.
 func runPrepared(args []string, stdout, stderr io.Writer, load func() ([]byte, error), executable func() (string, error), prepare func(string, []string, io.Writer) (install.Preparation, error)) int {
+	return runPreparedWithSSH(args, stdout, stderr, load, executable, prepare, audit.RequestSSHExecution, audit.CurrentSSHExecutionCaller, installedSSHEntry)
+}
+
+func runPreparedWithSSH(args []string, stdout, stderr io.Writer, load func() ([]byte, error), executable func() (string, error), prepare func(string, []string, io.Writer) (install.Preparation, error), requestSSH func(context.Context, string, audit.SSHExecutionRequest) error, currentCaller func() (audit.SSHExecutionCaller, error), isInstalled func(string) bool) int {
 	flags := flag.NewFlagSet("anqu", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	showVersion := flags.Bool("version", false, "print program version")
 	service := flags.Bool("service", false, "run continuously using setup.interval_seconds")
+	scan := flags.Bool("scan", false, "run one complete file/process audit")
+	sshReport := flags.Bool("ssh-report", false, "report the current SSH login once for this invocation")
 	master := flags.String("master", os.Getenv("ANQUAN_MASTER"), "configuration Master hostname or IP, optionally comma-separated (TCP port defaults to 55556); env ANQUAN_MASTER; fresh nodes default to "+defaults.MasterAddress+"; independent of YAML UDP server list")
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: anqu [-service] [-master HOST[:PORT]] [-version]\nOn a fresh Linux node, run as root without arguments to install and start agent.service using "+defaults.MasterAddress+". Use -master / ANQUAN_MASTER for explicit TCP configuration delivery and automatic local-IP identification. YAML server controls UDP reporting only. Local config.age is optional; saved connection settings allow no-argument checks. Without an audit configuration, -service waits for platform assignment without scanning.")
+		fmt.Fprintln(stderr, "Usage: anqu [-service | -scan | -ssh-report] [-master HOST[:PORT]] [-version]\nOn a fresh Linux node, run as root without arguments to install and start agent.service using "+defaults.MasterAddress+". At the installed path, no arguments report one SSH login per invocation through agent.service; use -scan for a full audit. Use -master / ANQUAN_MASTER for explicit TCP configuration delivery. YAML server controls UDP reporting only. Without an audit configuration, -service waits for platform assignment without scanning.")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
@@ -50,10 +56,17 @@ func runPrepared(args []string, stdout, stderr io.Writer, load func() ([]byte, e
 		fmt.Fprintln(stdout, "anqu "+version)
 		return 0
 	}
+	if (*service && (*scan || *sshReport)) || (*scan && *sshReport) {
+		fmt.Fprintln(stderr, "-service, -scan and -ssh-report cannot be combined")
+		return 1
+	}
 	path, err := executable()
 	if err != nil {
 		fmt.Fprintln(stderr, "cannot locate executable directory")
 		return 1
+	}
+	if *sshReport || (len(args) == 0 && isInstalled(path)) {
+		return reportSSHExecution(path, *master, stderr, load, requestSSH, currentCaller)
 	}
 	prepared, err := prepare(path, args, stdout)
 	if err != nil {

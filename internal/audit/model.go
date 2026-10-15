@@ -43,12 +43,17 @@ type MD5Result struct {
 }
 
 type LoginRecord struct {
-	ID        string    `json:"id,omitempty"`
-	Method    string    `json:"method,omitempty"`
-	SourceIP  string    `json:"source_ip"`
-	LoginTime time.Time `json:"login_time"`
-	User      string    `json:"user"`
-	Terminal  string    `json:"terminal"`
+	ID             string     `json:"id,omitempty"`
+	Method         string     `json:"method,omitempty"`
+	SourceIP       string     `json:"source_ip"`
+	SourcePort     int        `json:"source_port,omitempty"`
+	LoginTime      time.Time  `json:"login_time"`
+	User           string     `json:"user"`
+	Terminal       string     `json:"terminal"`
+	SourceRecordID string     `json:"source_record_id,omitempty"`
+	Trigger        string     `json:"trigger,omitempty"`
+	InvokedAt      *time.Time `json:"invoked_at,omitempty"`
+	ExecutedBy     string     `json:"executed_by,omitempty"`
 }
 
 type LoginResult struct {

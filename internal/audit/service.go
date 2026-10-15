@@ -95,7 +95,13 @@ func serveRuntime(ctx context.Context, c Config, writer io.Writer, version strin
 		}()
 		go func() {
 			defer workers.Done()
-			sshLoginLoop(workerCtx, cfg, writer)
+			if cfg.Login.Mode == "poll" {
+				sshLoginLoop(workerCtx, cfg, writer)
+			} else if cfg.Login.Enabled {
+				if err := serveSSHExecutions(workerCtx, cfg, writer); err != nil && workerCtx.Err() == nil {
+					_ = writeLog(cfg, writer, time.Now(), "ssh_execution_error", map[string]string{"error": err.Error()})
+				}
+			}
 		}()
 		return func() { cancel(); workers.Wait() }
 	}

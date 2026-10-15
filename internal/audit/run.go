@@ -69,7 +69,11 @@ func runWithWriter(c Config, writer io.Writer, startupHeartbeat bool) (r Report,
 	// Only the short login transaction shares the realtime worker's lock.
 	// Hashing files and enumerating processes must not delay SSH collection.
 	var loginNext *loginBaseline
-	if c.MonitoringMode() || c.realtimeLogin || c.Login.Source == "journal" || c.Login.Source == "authlog" {
+	if c.realtimeLogin && c.Login.Mode != "poll" {
+		// Execution requests have their own transaction and event identity. A
+		// scheduled scan must not send an additional notification for that login.
+		r.Login = LoginResult{Enabled: c.Login.Enabled, Success: true, Source: c.Login.Source, Path: c.Login.Path}
+	} else if c.MonitoringMode() || c.realtimeLogin || c.Login.Source == "journal" || c.Login.Source == "authlog" {
 		if c.Login.Enabled {
 			unlockLogin, err := lockSSHLoginState(context.Background(), c)
 			if err != nil {

@@ -9,8 +9,9 @@ server:
   - 172.22.0.100:55555
 login:
   enabled: true
+  mode: trigger
   source: journal
-  poll_interval_ms: 1000
+  poll_interval_ms: 1000 # 仅 mode: poll 时启用独立增量采集
 setup:
   interval_seconds: 300
 ```
@@ -58,7 +59,7 @@ v0.6.6 自动识别本机 IP：Agent 读取已建立 TCP 连接的 LocalAddr，�
 
 Master 收到首条有效心跳或检测事件时，按机器 IP 自动创建记录；每条有效上报按主控接收时间更新 `last_seen`。支持心跳的机器离线阈值为 `max(心跳周期 × 3, 30)` 秒，因此当前 Agent 连续超过 90 秒没有任何有效上报时显示 `status: abnormal_offline`（异常离线）、`online: false`；再次收到有效上报立即恢复 `status: online`、`online: true`。列表、机器详情和概览使用同一规则，接口同时返回 `heartbeat_interval_seconds` 和 `offline_after_seconds`。
 
-`heartbeat` 只更新机器状态，不写入 `events`，不增加告警/登录/事件数量，也不触发 webhook。乱序心跳不会把机器的心跳周期回退到旧值。单次运行（无参数）仅在采集前发送一次启动心跳，退出后不再周期上报；需要持续在线状态时使用 `-service`。外部 timer 两轮之间没有常驻 Agent 时，超过阈值会显示离线。
+`heartbeat` 只更新机器状态，不写入 `events`，不增加告警/登录/事件数量，也不触发 webhook。乱序心跳不会把机器的心跳周期回退到旧值。完整单次巡检 `-scan` 仅在采集前发送一次启动心跳，退出后不再周期上报；v0.6.8 已安装路径无参和 `-ssh-report` 只请求一次登录上报，在线心跳由常驻服务负责。需要持续在线状态时使用 `-service`。外部 timer 两轮之间没有常驻 Agent 时，超过阈值会显示离线。
 
 旧 Agent 仍可只发送 `scan_summary`：没有收到独立心跳的机器使用 `max(扫描周期 × 3, 120)` 秒作为离线阈值，默认扫描 300 秒对应 900 秒，避免正常巡检间隔被误判离线。收到新 Agent 的独立心跳后自动使用心跳阈值。
 
@@ -70,12 +71,12 @@ Master 监听 `55556/tcp`。v0.6.4 新机器自动安装的 `agent.service` 固�
 
 不要求本地 `config.age`：Agent 自动保存连接信息供后续无参数运行使用。连接文件为 `/usr/local/anquan/agent.connection.age`，通过内置配套 age 密钥加密主控地址和自动识别身份；旧 `agent.connection.json` 成功迁移后删除。默认域名编译进程序，主控 IP 由 DNS 决定；前台运行保留参数或环境变量设置地址的能力。内置密钥无法防 root 或逆向提取。无有效平台缓存或本地配置时，`-service` 只连接、注册并保持 TCP 心跳，等待下发，不开启巡检/登录/命令采集；DNS 或 Master 离线时持续重连。收到有效配置并完成运行环境检查和密文缓存后才启用采集并 ACK。主控明确取消分配时，无本地配置的 Agent 恢复等待，配置通道继续运行。
 
-Linux 新机器从上传目录无参数执行会完成安装并启动后台服务后退出。已安装路径无参数仍执行一次：已有平台缓存时可以离线采集并上报 SSH 登录；可达 Master 时先限时同步配置，随后执行一次并退出。无本地配置和保存地址时连接默认域名；限时同步后仍未获得配置时退出 1。SSH 登录按有效配置的 enabled/source/回看范围采集，沿用持久游标，不因重新执行而重复上报已读记录。
+Linux 新机器从上传目录无参数执行会完成安装并启动后台服务后退出。v0.6.8 已安装路径无参或 `-ssh-report` 向 root 常驻服务的 Unix socket 请求一次 SSH 上报，使用当前有效配置，不运行完整巡检或 TCP 同步。普通用户无需读取 0600 配置，但必须由服务验证 SSH 上下文和调用者身份；root 没有 `SSH_CONNECTION` 时允许最近真实认证快照。仅 socket 不可用时 root 可从有效平台缓存/本地配置直接上报；服务明确拒绝、配置未应用或找不到真实记录均返回错误，不编造登录时间。原完整单次流程使用 `-scan`，该流程才限时同步配置并采集一轮。
 
 每帧是 UTF-8 JSON 加换行（NDJSON），最大 8 MiB，`version: 1`。JSON 字符串内的 age 密文换行使用 JSON 转义。第一帧：
 
 ```json
-{"version":1,"type":"hello","ip":"172.22.0.27","reported_ip":"172.22.0.27","host":"node-a","agent_version":"0.6.7"}
+{"version":1,"type":"hello","ip":"172.22.0.27","reported_ip":"172.22.0.27","host":"node-a","agent_version":"0.6.8"}
 ```
 
 本机模式省略 discover_ip（false），`ip` 与 `reported_ip` 必须是同一规范化本机 IP。旧 Master 已支持显式 hello.ip，因此不识别新增字段时仍按本机 IP 登记，并直接发送配置；新版 Master 识别 reported_ip 后先确认身份再发送最新分配：
@@ -102,7 +103,7 @@ Agent 先验证 revision、age 完整性和节点平台的 YAML 配置，再原�
 
 Agent 每 30 秒发送 `{"version":1,"type":"ping"}`，主控回复 `{"version":1,"type":"pong"}`。有效 hello 和 ping 更新机器活动时间；连接异常后 Agent 自动重连。页面 `connected` 单独表示配置 TCP 连接，机器 `online` 仍按最近活动时间及既有超时阈值计算。
 
-主控配置优先于可选本地 config.age，启动先使用有效缓存，再限时同步；无缓存且无本地配置时常驻等待。无参数仍执行一次巡检及 SSH 登录上报。下发 server 列表立即生效并替换 UDP 目标，TCP 配置地址及自动 IP 不由 YAML 控制。连接文件 version 3 保存 master、local_ip 和兼容回退 observed_ip；version 1/2 自动迁移，并忽略旧手工 agent_ip。重启仅恢复仍属于本机接口的 local_ip，observed_ip 仅留作兼容元数据，不恢复为机器身份。临时 UDP 路由身份不强制落盘，由 TCP 选取的本机 IP 持久化。服务账号需要程序目录的缓存写入权限。升级顺序为 Master、Agent，再更新 Web 示例。升级后本机 IP 会成为新的机器记录；已有代理记录可能混合多个节点的历史，不自动迁移或删除，旧目标的配置需按真实机器重新确认下发。
+主控配置优先于可选本地 config.age，常驻或 `-scan` 启动先使用有效缓存，再限时同步；无缓存且无本地配置时常驻等待。v0.6.8 已安装路径无参仅请求执行上报，不同步 TCP 或执行完整巡检。下发 server 列表立即生效并替换 UDP 目标，TCP 配置地址及自动 IP 不由 YAML 控制。连接文件 version 3 保存 master、local_ip 和兼容回退 observed_ip；version 1/2 自动迁移，并忽略旧手工 agent_ip。重启仅恢复仍属于本机接口的 local_ip，observed_ip 仅留作兼容元数据，不恢复为机器身份。临时 UDP 路由身份不强制落盘，由 TCP 选取的本机 IP 持久化。服务账号需要程序目录的缓存写入权限。升级顺序为支持执行事件的 Master、Agent，再更新 Web 示例。升级后本机 IP 会成为新的机器记录；已有代理记录可能混合多个节点的历史，不自动迁移或删除，旧目标的配置需按真实机器重新确认下发。
 
 此通道沿用内网机器 IP 信任方式，没有单独的节点认证或 TLS；age 密文用于配置加密，不构成 Master 身份认证。仅允许可信 Agent 网络访问 55556/TCP。既有 UDP、HTTP 与 Webhook 的传输行为保持原有协议。
 
@@ -133,7 +134,7 @@ Agent 每 30 秒发送 `{"version":1,"type":"ping"}`，主控回复 `{"version":
 }
 ```
 
-这里的 `interval_seconds` 是 Agent 常驻服务完整文件/进程巡检周期，默认 300 秒；独立心跳为 30 秒，v0.6.7 的 SSH 独立采集由 `login.poll_interval_ms` 控制，默认 1000 毫秒。独立 SSH 采集的新增记录不要求计入每次完整巡检摘要，不能仅凭摘要中 `logins=0` 判断没有 SSH 上报。`collection_success` 仅表示采集完成，异常文件或缺失进程也可以是有效检测结果；应同时查看 `alerts` 与 `errors`。主控接纳乱序的心跳、告警、登录报文，旧扫描摘要不会覆盖新的摘要或心跳周期。
+这里的 `interval_seconds` 是 Agent 常驻服务完整文件/进程巡检周期，默认 300 秒；独立心跳为 30 秒。v0.6.8 trigger 服务扫描不自动采集登录，执行请求的记录单独上报；显式 poll 的 SSH 独立采集由 `login.poll_interval_ms` 控制，默认 1000 毫秒。两者的登录记录均不要求计入每次完整巡检摘要，不能仅凭 `logins=0` 判断没有 SSH 上报。`collection_success` 仅表示采集完成，异常文件或缺失进程也可以是有效检测结果；应同时查看 `alerts` 与 `errors`。主控接纳乱序的心跳、告警、登录报文，旧扫描摘要不会覆盖新的摘要或心跳周期。
 
 ## 文件等通用告警
 
@@ -158,9 +159,28 @@ Agent 每 30 秒发送 `{"version":1,"type":"ping"}`，主控回复 `{"version":
 
 `target` 是异常文件路径、搜索规则或进程命令。文件常见类型为 `added`、`modified`、`deleted`、`missing`、`not_found`；检查失败可为 `inspection_error` 或 `collection_error`。从 Agent v0.5.1 起，fils/dir/search 命中任意配置 MD5 即正常，未知 MD5 初始化时记录为该路径的基线，之后变成另一个未知值产生 `modified`，不再仅因未命中配置值产生 `md5_mismatch`。主控仍可接收旧版 Agent 的 `md5_mismatch`。`before` / `after` 可省略：修改保存前后 MD5，删除只有旧 MD5，新增只有新 MD5；旧版允许列表不匹配保存允许值与当前值。主控应保存原始 `data`，不要把其他模块的这两个字段强制解释为 MD5。
 
-## 每次 SSH 成功登录
+## SSH 登录上报：trigger 与 poll
 
-v0.6.7 常驻模式按 `login.poll_interval_ms` 独立采集成功登录，不等待默认 300 秒的完整巡检。范围为 100–60000 毫秒，旧配置省略时默认 1000；`login.enabled: false` 关闭采集。采集后立即尝试发送以下原有 `ssh_login` 数据报，协议 `version: 1` 和事件字段保持兼容。无参数单次执行仍只采集一次。
+v0.6.8 默认 `login.mode: trigger`。系统 sshrc、已安装路径无参执行或 `-ssh-report` 每次请求上报一条匹配的真实成功认证记录；重复执行同一会话会产生独立执行 ID。原有两行 ssh-init.sh 保持兼容，由 root 服务读取配置和日志；常驻完整扫描不再自动补发相同登录。`login.enabled: false` 或无有效配置时不接受上报。
+
+trigger 沿用 `ssh_login` 及协议 `version: 1`，新增字段如下。`login_time` 与外层 `time` 保持真实认证时间，执行时间单独保存在 `invoked_at`：
+
+| data 字段 | 含义 |
+|---|---|
+| `id` | 本次执行请求的随机 32 位十六进制 ID；同一请求重传保持不变，不同执行分别生成 |
+| `trigger` | 执行上报为 `execution` |
+| `source_record_id` | 原 journal 游标或来源记录 ID；相同认证的多次执行可以相同 |
+| `invoked_at` | 本次请求的时间，RFC3339 |
+| `executed_by` | 经服务校验的执行用户；与原认证用户分开保存 |
+| `source_port` | 可获得时保存原 SSH 客户端端口，用于匹配连接 |
+
+例如一次执行对应的 data：
+
+```json
+{"id":"253273fd94e641bc8f78386576e7bfe2","trigger":"execution","source_record_id":"journal-cursor","source_ip":"192.0.2.10","source_port":42000,"login_time":"2026-10-02T09:55:00+08:00","user":"ops","terminal":"N/A","method":"publickey","invoked_at":"2026-10-02T10:00:00+08:00","executed_by":"ops"}
+```
+
+显式设置 `login.mode: poll` 才保留 v0.6.7 的增量模式：按 `login.poll_interval_ms` 独立采集成功登录，不等待默认 300 秒完整巡检。范围为 100–60000 毫秒，省略时默认 1000；沿用已有加密 `.logins` 游标和稳定来源 ID，升级不用清除状态。poll 模式拒绝执行上报请求，避免两种来源同时发出同一次登录。poll 报文继续使用原字段：
 
 ```json
 {
@@ -183,9 +203,9 @@ v0.6.7 常驻模式按 `login.poll_interval_ms` 独立采集成功登录，不�
 
 `ip` 是被登录机器，`source_ip` 是登录来源，两者不可混用。来源没有终端时 `terminal` 为 `N/A`。生产默认读取 journal 成功认证记录，支持非交互 SSH；wtmp 只能覆盖操作系统写入的会话。
 
-独立采集继续使用已有加密 `.logins` 游标和稳定 `event_id`，升级无需删除状态；相同来源记录 ID 的登录继续去重，不会因轮询变快重发旧登录。有新增登录时，Agent 本机 `ssh_poll_complete` 日志保存本页新增记录数和 UDP 发送结果，逐条记录仍写 `ssh_login`；空闲轮询不逐秒写日志，错误查看 `ssh_login_error`。每秒是采集节奏，最终机器人通知还受系统日志写入、UDP 网络、Master 入库与接收端响应耗时影响。
+trigger 不读取或更新 `.logins`，不更新 Prom；每次本机 `ssh_execution_complete` 保存执行及原认证 ID、调用者身份和 UDP 发送结果。poll 有新增登录时，`ssh_poll_complete` 保存本页记录数和发送结果，逐条仍写 `ssh_login`；空闲不逐秒写日志，错误查看 `ssh_login_error`。生产使用可读 journal 并确认已应用有效配置及非空 `server`；没有真实匹配记录时失败。每秒仅描述 poll 的采集节奏，UDP 发送成功不保证 Master 入库和机器人最终送达。
 
-Master v0.6.0 将新入库的 `ssh_login` 与通知任务在同一事务提交，向全部已启用 webhook 发送登录通知。正文保留机器、主机名、用户、来源 IP、终端、认证方式、真实登录时间和事件 ID。重复事件及相同来源 ID 的登录不重复入队，数据库中已有历史记录不补发；补读/延迟上报的登录首次入库时仍通知。通知失败沿用持久重试，重启后继续发送。
+配套 Master 将新入库的 `ssh_login` 与通知任务在同一事务提交，向全部已启用 webhook 发送登录通知。正文保留机器、主机名、用户、来源 IP、终端、认证方式、真实登录时间和事件 ID。trigger 必须按独立执行 ID 分别入库通知，不能因 `source_record_id` 相同合并两次执行；重复提交同一执行 ID 不重复入队。poll 保留相同来源记录的去重，数据库中已有历史记录不补发；补读/延迟上报的登录首次入库时仍通知。通知失败沿用持久重试，重启后继续发送。
 
 ## 操作命令及落库确认（v0.6.0）
 
@@ -226,6 +246,6 @@ Master v0.6.0 将新入库的 `ssh_login` 与通知任务在同一事务提交�
 
 ## 重复、持久化与投递边界
 
-同一报告构造相同的事件 ID，多个 UDP 副本按 `(ip,event_id)` 去重。登录使用机器 IP、主机名、事件类型与来源记录 `id` 生成标识，同一登录跨完整巡检或独立轮询重新读取保持相同标识；不同来源 ID 的两次登录即使用户/IP/时间完全相同也会分别保留。没有来源 ID 的兼容记录按其原始时间和内容生成标识。告警与摘要按扫描时间和内容生成标识，持续缺失在下轮仍产生新记录；文件变化因本地发布失败而跨轮重新检测，也可能形成新的告警观察记录。
+同一报告构造相同的事件 ID，多个 UDP 副本按 `(ip,event_id)` 去重。trigger 登录使用机器 IP、主机名、事件类型与本次执行 `id` 生成标识；同一请求的重传保持相同，下一次执行有新的 ID，即使原认证 `source_record_id` 相同也分别保留。poll 使用来源记录 `id`，同一登录跨完整巡检或独立轮询重新读取保持相同标识；不同来源 ID 的两次登录即使用户/IP/时间完全相同也分别保留。没有来源 ID 的兼容记录按其原始时间和内容生成标识。告警与摘要按扫描时间和内容生成标识，持续缺失在下轮仍产生新记录；文件变化因本地发布失败而跨轮重新检测，也可能形成新的告警观察记录。
 
 常规巡检告警、登录、摘要和心跳的 Agent → Master 传输没有 ACK 或持久重传。成功发送只表示本地网络栈接受，不代表主控已存储；网络丢包、主控停机或超大数据报可能导致缺记录。命令采集通道采用上述落库确认及持久重试。Master → webhook 的告警及登录通知在入库后采用持久重试，重复事件不重复入队。

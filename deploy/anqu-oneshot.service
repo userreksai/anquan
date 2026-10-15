@@ -8,7 +8,7 @@ Type=oneshot
 User=root
 UMask=0022
 EnvironmentFile=-/etc/anqu-agent.env
-ExecStart=/usr/local/anquan/anquan
+ExecStart=/usr/local/anquan/anquan -scan
 # 2 means collection succeeded and detected an alert.
 SuccessExitStatus=2
 LimitCORE=0

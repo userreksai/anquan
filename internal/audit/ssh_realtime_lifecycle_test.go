@@ -64,7 +64,7 @@ func TestSSHRealtimeConfigurationSwitchAndDisable(t *testing.T) {
 	}
 	frameFor := func(enabled bool, endpoint string) configFrame {
 		t.Helper()
-		yaml := fmt.Sprintf("output_dir: local\nstate_file: state/md5.json\nmd5: {enabled: false}\nexistence: {enabled: false}\nlogin:\n  enabled: %t\n  source: jsonl\n  path: login.jsonl\n  poll_interval_ms: 100\nserver: ['%s']\nsetup:\n  logs: local/logs/agent.log\n  prom: local/agent.prom\n  interval_seconds: 300\n", enabled, endpoint)
+		yaml := fmt.Sprintf("output_dir: local\nstate_file: state/md5.json\nmd5: {enabled: false}\nexistence: {enabled: false}\nlogin:\n  enabled: %t\n  mode: poll\n  source: jsonl\n  path: login.jsonl\n  poll_interval_ms: 100\nserver: ['%s']\nsetup:\n  logs: local/logs/agent.log\n  prom: local/agent.prom\n  interval_seconds: 300\n", enabled, endpoint)
 		ciphertext, err := sealed.EncryptConfig([]byte(yaml))
 		if err != nil {
 			t.Fatal(err)
