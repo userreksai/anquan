@@ -1,5 +1,5 @@
 # Anqu：在管理设置的 Age 配置加密页面编辑此 YAML，下载 config.age。
-# 本地 config.age 可选：新机 root 无参执行会安装并启动 agent.service，连接 sa.sa.ops.tw 等待平台下发。
+# 本地 config.age 可选：新机 root 无参执行会安装并启动 agent.service，连接 172.22.0.27 等待平台下发。
 # 如需本地回退配置，将 config.age 放在 Agent 可执行文件旁边；启动读取。
 # 通用 Agent 构建无需 YAML：go run ./cmd/anqu-build -output ./dist/anquan -goos linux -goarch amd64
 # 页面直接加密，无需填写或管理密钥；使用配套新版 Agent 读取。
@@ -74,14 +74,14 @@ login:
   # last_command: last
 
 # 完整巡检默认生成本地日志/指标；SSH 执行上报必须配置非空 server。主控 UDP 默认监听 55555。
-# TCP 配置地址由自动服务固定为 sa.sa.ops.tw（默认 55556），前台仍支持 -master/ANQUAN_MASTER；不使用本列表。
+# TCP 配置地址由自动服务固定为 172.22.0.27（默认 55556），前台仍支持 -master/ANQUAN_MASTER；不使用本列表。
 # 下发可修改本 UDP 列表；server: [] 只关闭数据上报，仍可接收配置。
 # 无分配且无本地文件时保持等待，不巡检；不需要 agent_ip。
 server: []
 # 有接收端后，将上面一行替换为：
 # server:
-#   - sa.sa.ops.tw:55555
-# 支持裸域名、IP 或显式端口；多台默认端口示例：server: [sa.sa.ops.tw,192.168.0.2]
+#   - 172.22.0.27:55555
+# 支持裸域名、IP 或显式端口；多台默认端口示例：server: [172.22.0.27,192.168.0.2]
 # Agent 从到配置主控的 TCP 路由自动取得本机网卡 IP，中转/NAT 来源单独保存在主控。
 # TCP 未连接时共享首个可用 UDP 路由地址；无需填写机器 IP，也不查询公网 IP 服务。
 

@@ -29,7 +29,7 @@ func testOperations(t *testing.T, commands *[][]string) runtimeOperations {
 	}
 }
 
-func TestFirstNoArgumentLaunchStartsFixedDomainServiceAndReturns(t *testing.T) {
+func TestFirstNoArgumentLaunchStartsFixedAddressServiceAndReturns(t *testing.T) {
 	requireSymlinks(t)
 	source, paths := fixture(t)
 	put(t, source, "uploaded agent")
