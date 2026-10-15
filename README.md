@@ -1,6 +1,8 @@
-# Anqu 安全检测 Agent（v0.6.8）
+# Anqu 安全检测 Agent（v0.6.9）
 
 Anqu 在 Linux 节点持续检查文件 MD5、文件增删和进程变化，并逐条记录成功的 SSH 登录。服务启动时记录当前时间，每轮将当前主机的完整检测结果和告警写入日志，并更新固定路径的 Prometheus 文件。运行日志按北京时间零点切换文件，不再生成时间戳命名的单轮 JSON 报告。
+
+v0.6.9 收敛启动文件：无参数自动安装并成功启动服务后删除本次 `anquan.upload-*` 临时备份；安装时不再预建空的 `state/`、`logs/`、`textfile/`，由实际功能按需创建。Linux 标准安装的服务锁和 SSH socket 统一放到 `/run/anquan/`，不再在程序目录新建 `.anqu-service-locks/`、`.ssh-execution/`；连接信息、配置缓存、实际使用的日志、基线和指标继续保留。升级须先停止旧服务，再替换程序并启动。
 
 v0.6.8 默认 `login.mode: trigger`：已安装路径每次无参数执行立即请求上报一次真实 SSH 登录，同一会话连续执行也生成独立事件，服务巡检不会额外补发登录。原有两行 `ssh-init.sh` 保持兼容。需要 v0.6.7 的每秒增量采集和跨轮去重时，明确设置 `login.mode: poll`；完整文件/进程巡检仍默认每 300 秒运行。
 
@@ -64,6 +66,13 @@ Agent 和 Master 代码内置一组固定配套密钥，构建不会重新生成
   agent.connection.age
   config.master.age
   config.age             # 可选本地回退配置
+  state/                 # 按需：加密基线、游标及事务锁
+  logs/                  # 按需：配置选择此处时写入日志
+  textfile/              # 按需：巡检生成的最新指标
+
+/run/anquan/              # Linux 标准安装的临时运行数据，重启后重建
+  .anqu-service-locks/
+  .ssh-execution/agent.sock
 ```
 
 使用本地回退配置时，保留密文完整的 `-----BEGIN AGE ENCRYPTED FILE-----` / `-----END AGE ENCRYPTED FILE-----` 标记。替换时先上传临时文件，再在同一文件系统重命名为 `config.age`，避免运行期间读到一半文件。明文、截断、公钥不匹配或无法读取的本地配置仍会被拒绝；只有文件不存在时进入平台配置启动流程，不将损坏配置当作缺失。单次运行保持静默，失败退出码为 1；常驻模式会输出错误到服务日志。
@@ -222,7 +231,7 @@ JSONL 示例：
 | `/usr/local/anquan/state/md5.json.processes` | 加密的进程列表滚动基线 |
 | `/usr/local/anquan/state/md5.json.logins` | 加密的登录游标及已记录状态 |
 
-上述状态沿用原文件名以兼容 `state_file` 配置，内容为带版本标识的 AES-256-GCM 密文，已不是可直接读取的 JSON。每次写入使用随机 nonce，并校验内容及所属模块；临时文件也只写密文。状态密钥从 Agent 内置部署密钥单独派生，节点无需新增密钥或明文配置文件。普通状态 `.lock` 是不包含配置的空锁文件；Linux 常驻互斥改用隐藏目录 inode，不再创建 `config.master.age.service.lock`。升级不自动移除已有锁文件。
+上述状态沿用原文件名以兼容 `state_file` 配置，内容为带版本标识的 AES-256-GCM 密文，已不是可直接读取的 JSON。每次写入使用随机 nonce，并校验内容及所属模块；临时文件也只写密文。状态密钥从 Agent 内置部署密钥单独派生，节点无需新增密钥或明文配置文件。普通状态 `.lock` 是不包含配置的空锁文件；Linux 标准安装的常驻互斥目录位于 `/run/anquan/.anqu-service-locks/`，不再创建 `config.master.age.service.lock`。自定义安装路径及标准目录之外的状态路径沿用原有锁位置。锁释放后保留 inode，避免并发进程锁到不同对象；不要删除正在使用的锁目录。升级不自动移除已有锁文件。
 
 配置、连接信息和内部状态保留密文；日志和 Prometheus 指标仍供运维和采集系统读取，其中会包含路径、MD5 和检测结果。连接使用内置配套 age 密钥，解决直接 `cat` 暴露明文的问题，无法防止 root 或持有程序、源码的人提取密钥解密。v0.6.3 停止新建 `20261013_131831.021663531+0800.json` 这类单轮报告，已有报告不自动删除。
 
@@ -294,11 +303,11 @@ Agent 不修改、清空或轮转源日志，日志会按原脚本持续增大�
 
 ## 运行和 systemd 部署
 
-节点只需对应架构的 Agent，不需 Go 或 YAML。Linux 从任意上传目录无参数执行时，Agent 自动创建 `/usr/local/anquan/` 及 `state/`、`logs/`、`textfile/`，将自身安装为 `/usr/local/anquan/anquan`，安装 SSH 入口和 `/etc/systemd/system/agent.service`，执行 `systemctl daemon-reload` 和 `systemctl enable --now agent.service` 后退出 0；服务在后台运行并开机启动。首次安装需要 root 和 systemd，失败会返回错误并保留安装进度，可重新执行程序重试。安装时会停止并禁用同目录已有的 agent.timer 和 anqu.timer，避免旧调度与常驻服务争抢。已安装路径无参数执行只请求一次 SSH 上报，不再次启停服务；完整单次巡检使用 `-scan`，`-service` 保留前台常驻方式。`-help`、`-version` 只查看信息，不执行安装。可选 `config.age`、平台缓存和连接文件只在目标不存在时从原程序旁复制，不覆盖已安装配置，不删除上传目录的源副本；旧连接 JSON 的加密迁移只处理固定运行目录。已有不同的同名服务文件先备份为 `.anquan.bak` 后替换，其它 drop-in 保留。
+节点只需对应架构的 Agent，不需 Go 或 YAML。Linux 从任意上传目录无参数执行时，Agent 自动创建 `/usr/local/anquan/`，`state/`、`logs/`、`textfile/` 由实际功能按需创建，将自身安装为 `/usr/local/anquan/anquan`，安装 SSH 入口和 `/etc/systemd/system/agent.service`，执行 `systemctl daemon-reload` 和 `systemctl enable --now agent.service` 后退出 0；服务在后台运行并开机启动。首次安装需要 root 和 systemd，失败会返回错误并保留安装进度，可重新执行程序重试。安装时会停止并禁用同目录已有的 agent.timer 和 anqu.timer，避免旧调度与常驻服务争抢。已安装路径无参数执行只请求一次 SSH 上报，不再次启停服务；完整单次巡检使用 `-scan`，`-service` 保留前台常驻方式。`-help`、`-version` 只查看信息，不执行安装。可选 `config.age`、平台缓存和连接文件只在目标不存在时从原程序旁复制，不覆盖已安装配置，不删除上传目录的源副本；旧连接 JSON 的加密迁移只处理固定运行目录。已有不同的同名服务文件先备份为 `.anquan.bak` 后替换，其它 drop-in 保留。
 
 将对应架构二进制传到新机器后，无需额外上传部署单元或配置环境变量：
 
-v0.6.5 支持直接将上传文件命名为 `/usr/local/anquan` 并执行：当这个路径是当前运行的普通程序文件时，安装器先将它保留到同父目录的唯一 `anquan.upload-*` 备份，再创建 `/usr/local/anquan/` 并安装为 `/usr/local/anquan/anquan`。输出会显示备份路径，后续安装失败仍可用该备份重试。安装目录被其它文件或符号链接占用时会明确报错并保留原对象。
+v0.6.5 支持直接将上传文件命名为 `/usr/local/anquan` 并执行：当这个路径是当前运行的普通程序文件时，安装器先将它保留到同父目录的唯一 `anquan.upload-*` 备份，再创建 `/usr/local/anquan/` 并安装为 `/usr/local/anquan/anquan`。v0.6.9 在无参数自动安装和服务启动成功后删除本次临时备份，失败时保留并提示重试路径；不扫描删除历史备份。安装目录被其它文件或符号链接占用时会明确报错并保留原对象。
 
 ```sh
 chmod 0700 ./anqu-linux-amd64
@@ -314,7 +323,7 @@ sudo /usr/local/anquan/anquan -version
 /usr/local/anquan/anquan </dev/null >/dev/null 2>&1
 ```
 
-SSH 登录通过此入口请求一次上报；root 服务通过本地 Unix socket `/usr/local/anquan/.ssh-execution/agent.sock` 接收请求，依据内核提供的进程身份校验调用者并读取日志，因此 ubuntu 等普通用户无需读取 0600 配置。非 root 请求必须提供匹配的 SSH 连接上下文并通过 SSH 进程链验证；root 没有 `SSH_CONNECTION` 时可上报最近一条真实认证快照。仅 socket 不可用时允许 root 读取有效缓存直接上报，不做 TCP 同步。Agent 不修改 `sshd_config`；用户级 `~/.ssh/rc` 可能优先于系统 sshrc，目标机仍需验收登录事件。
+SSH 登录通过此入口请求一次上报；root 服务通过本地 Unix socket `/run/anquan/.ssh-execution/agent.sock` 接收请求，依据内核提供的进程身份校验调用者并读取日志，因此 ubuntu 等普通用户无需读取 0600 配置。非 root 请求必须提供匹配的 SSH 连接上下文并通过 SSH 进程链验证；root 没有 `SSH_CONNECTION` 时可上报最近一条真实认证快照。仅 socket 不可用时允许 root 读取有效缓存直接上报，不做 TCP 同步。Agent 不修改 `sshd_config`；用户级 `~/.ssh/rc` 可能优先于系统 sshrc，目标机仍需验收登录事件。
 
 已安装路径无参数保持静默，等价于本次 `-ssh-report` 请求；成功返回 0，配置未应用、未开启 trigger、缺少 server 或无真实匹配记录返回 1。用 `sudo /usr/local/anquan/anquan -scan` 执行原完整巡检；它按原流程限时同步配置，并处理一批启用的 history。`-service` 启动常驻循环，启动心跳发送后立即执行首轮文件/进程采集，并按 `setup.interval_seconds` 周期执行，不重叠执行；单轮超过周期时跳过无法及时执行的节拍。常驻模式另有独立的 30 秒心跳和启用的 history 采集，均不受扫描周期影响。trigger 模式只响应执行请求；poll 模式额外启动增量登录 worker。`-service`、`-scan`、`-ssh-report` 不能混用。`-help`、`-version` 用于查看帮助和版本；没有节点 `-config`、`-check-config` 或导出配置接口。
 

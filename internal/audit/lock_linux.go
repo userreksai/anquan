@@ -23,14 +23,64 @@ func lockState(path string) (func(), error) {
 // lock a new inode while the original inode is still locked.
 func lockService(path string) (func(), error) {
 	dir := serviceLockDirectory(path)
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return nil, err
+	_, system := systemRuntimeResource(path)
+	if system {
+		if err := prepareSystemRuntimeDirectory(dir, 0700); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return nil, err
+		}
 	}
+	legacy := ""
+	if system {
+		legacy = legacyServiceLockDirectory(path)
+	}
+	return lockServiceDirectories(path, dir, legacy)
+}
+
+// During an upgrade, an old process may still hold the installation-tree lock.
+// Keep that existing inode locked too, without recreating obsolete directories.
+func lockServiceDirectories(path, dir, legacy string) (func(), error) {
 	f, err := os.Open(dir)
 	if err != nil {
 		return nil, err
 	}
-	return lockLinuxFile(f, path)
+	unlock, err := lockLinuxFile(f, path)
+	if err != nil || legacy == "" {
+		return unlock, err
+	}
+	legacyInfo, err := os.Lstat(legacy)
+	if os.IsNotExist(err) {
+		return unlock, nil
+	}
+	if err != nil {
+		unlock()
+		return nil, err
+	}
+	if !legacyInfo.IsDir() || !sshExecutionRootOwned(legacyInfo) || legacyInfo.Mode().Perm()&0022 != 0 {
+		unlock()
+		return nil, fmt.Errorf("legacy service lock must be a root-owned directory not writable by other users: %s", legacy)
+	}
+	legacyFile, err := os.Open(legacy)
+	if err != nil {
+		unlock()
+		return nil, err
+	}
+	openedInfo, err := legacyFile.Stat()
+	if err != nil || !os.SameFile(legacyInfo, openedInfo) {
+		_ = legacyFile.Close()
+		unlock()
+		return nil, fmt.Errorf("legacy service lock changed before locking: %s", legacy)
+	}
+	legacyUnlock, err := lockLinuxFile(legacyFile, path)
+	if err != nil {
+		unlock()
+		return nil, err
+	}
+	var once sync.Once
+	return func() { once.Do(func() { legacyUnlock(); unlock() }) }, nil
 }
 
 func lockLinuxFile(f *os.File, path string) (func(), error) {

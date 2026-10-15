@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func TestSSHExecutionSocketUsesDedicatedDirectory(t *testing.T) {
+func TestSSHExecutionSocketKeepsCustomDeploymentDirectory(t *testing.T) {
 	base := t.TempDir()
 	want := filepath.Join(base, ".ssh-execution", "agent.sock")
 	if got := SSHExecutionSocket(base); got != want {

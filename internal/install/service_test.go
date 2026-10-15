@@ -53,10 +53,9 @@ func TestFirstNoArgumentLaunchStartsFixedAddressServiceAndReturns(t *testing.T) 
 	if target, err := os.Readlink(paths.sshrc); err != nil || target != paths.script {
 		t.Fatalf("SSH hook link: target %q, error %v", target, err)
 	}
-	for _, name := range []string{"state", "logs", "textfile"} {
-		info, err := os.Stat(filepath.Join(paths.directory, name))
-		if err != nil || !info.IsDir() {
-			t.Fatalf("runtime directory %s: %v", name, err)
+	for _, name := range []string{"state", "textfile"} {
+		if _, err := os.Lstat(filepath.Join(paths.directory, name)); !os.IsNotExist(err) {
+			t.Fatalf("installation precreated unused runtime directory %s: %v", name, err)
 		}
 	}
 	if !strings.Contains(output.String(), defaults.MasterAddress) || !strings.Contains(output.String(), "enabled and started") {
@@ -104,6 +103,8 @@ func TestUploadOccupyingDirectoryInstallsAndStartsService(t *testing.T) {
 	requireSymlinks(t)
 	_, paths := fixture(t)
 	put(t, paths.directory, "uploaded agent")
+	olderBackup := paths.directory + ".upload-existing"
+	put(t, olderBackup, "older upload backup")
 	put(t, filepath.Join(filepath.Dir(paths.directory), "config.age"), "optional upload configuration")
 	var commands [][]string
 	var output bytes.Buffer
@@ -115,10 +116,13 @@ func TestUploadOccupyingDirectoryInstallsAndStartsService(t *testing.T) {
 		t.Fatalf("systemctl commands %v; want %v", commands, want)
 	}
 	backups, err := filepath.Glob(paths.directory + ".upload-*")
-	if err != nil || len(backups) != 1 || !strings.Contains(output.String(), backups[0]) {
-		t.Fatalf("backup path not reported: backups %v, output %q, error %v", backups, output.String(), err)
+	if err != nil || !reflect.DeepEqual(backups, []string{olderBackup}) {
+		t.Fatalf("successful installation retained new backup or changed older backup: %v, error %v", backups, err)
 	}
-	wantFile(t, backups[0], "uploaded agent")
+	wantFile(t, olderBackup, "older upload backup")
+	if strings.Contains(output.String(), "Preserved uploaded agent") {
+		t.Fatalf("successful installation reported a removed backup: %q", output.String())
+	}
 	wantFile(t, paths.executable, "uploaded agent")
 	wantFile(t, filepath.Join(paths.directory, "config.age"), "optional upload configuration")
 	wantFile(t, paths.service, string(serviceUnit(paths.executable)))
@@ -127,9 +131,8 @@ func TestUploadOccupyingDirectoryInstallsAndStartsService(t *testing.T) {
 		t.Fatalf("SSH link target %q, error %v", target, err)
 	}
 	for _, name := range []string{"state", "logs", "textfile"} {
-		info, err := os.Stat(filepath.Join(paths.directory, name))
-		if err != nil || !info.IsDir() {
-			t.Fatalf("missing runtime directory %s: %v", name, err)
+		if _, err := os.Lstat(filepath.Join(paths.directory, name)); !os.IsNotExist(err) {
+			t.Fatalf("installation precreated unused runtime directory %s: %v", name, err)
 		}
 	}
 	commands = nil
@@ -164,6 +167,47 @@ func TestExplicitServiceFromDirectoryOccupantExecutesInstalledBinary(t *testing.
 		t.Fatalf("foreground args %v; want %v", started, want)
 	}
 	wantFile(t, paths.executable, "uploaded agent")
+}
+
+func TestUploadBackupRemainsAvailableWhenServiceActivationFails(t *testing.T) {
+	requireSymlinks(t)
+	for _, failedCall := range []int{1, 2, 3} {
+		t.Run(fmt.Sprint(failedCall), func(t *testing.T) {
+			_, paths := fixture(t)
+			put(t, paths.directory, "uploaded agent")
+			if failedCall == 3 {
+				put(t, paths.service, "legacy service")
+			}
+			var commands [][]string
+			ops := testOperations(t, &commands)
+			failure := errors.New("injected service activation failure")
+			ops.systemctl = func(args ...string) error {
+				commands = append(commands, append([]string(nil), args...))
+				backups, err := filepath.Glob(paths.directory + ".upload-*")
+				if err != nil || len(backups) != 1 {
+					t.Fatalf("upload backup removed before activation completed: %v, error %v", backups, err)
+				}
+				wantFile(t, backups[0], "uploaded agent")
+				if len(commands) == failedCall {
+					return failure
+				}
+				return nil
+			}
+			var output bytes.Buffer
+			_, err := prepare(paths.directory, nil, &output, paths, ops)
+			backups, globErr := filepath.Glob(paths.directory + ".upload-*")
+			if globErr != nil || len(backups) != 1 {
+				t.Fatalf("activation failure discarded retry upload: %v, error %v", backups, globErr)
+			}
+			if !errors.Is(err, failure) || !strings.Contains(err.Error(), "run "+backups[0]+" to retry installation") {
+				t.Fatalf("activation failure lost retry path: %v", err)
+			}
+			wantFile(t, backups[0], "uploaded agent")
+			if len(commands) != failedCall || output.Len() != 0 {
+				t.Fatalf("continued after failed activation: commands %v, output %q", commands, output.String())
+			}
+		})
+	}
 }
 
 func TestServiceInstallationPreservesLegacyUnitAndDropIns(t *testing.T) {
