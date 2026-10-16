@@ -152,6 +152,11 @@ func (d *ConfigDelivery) Sync(ctx context.Context) (Config, error) {
 			continue
 		}
 		err = d.connection(ctx, conn, endpoint, true, func(cfg Config, commit func() error) error {
+			// A one-shot scan must not acknowledge a component assignment
+			// without executing the service's transactional activation path.
+			if cfg.Security != nil || d.current.Security != nil {
+				return errors.New("security component assignments require -service mode")
+			}
 			if err := commit(); err != nil {
 				return err
 			}

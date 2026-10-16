@@ -248,4 +248,18 @@ trigger 不读取或更新 `.logins`，不更新 Prom；每次本机 `ssh_execut
 
 同一报告构造相同的事件 ID，多个 UDP 副本按 `(ip,event_id)` 去重。trigger 登录使用机器 IP、主机名、事件类型与本次执行 `id` 生成标识；同一请求的重传保持相同，下一次执行有新的 ID，即使原认证 `source_record_id` 相同也分别保留。poll 使用来源记录 `id`，同一登录跨完整巡检或独立轮询重新读取保持相同标识；不同来源 ID 的两次登录即使用户/IP/时间完全相同也分别保留。没有来源 ID 的兼容记录按其原始时间和内容生成标识。告警与摘要按扫描时间和内容生成标识，持续缺失在下轮仍产生新记录；文件变化因本地发布失败而跨轮重新检测，也可能形成新的告警观察记录。
 
-常规巡检告警、登录、摘要和心跳的 Agent → Master 传输没有 ACK 或持久重传。成功发送只表示本地网络栈接受，不代表主控已存储；网络丢包、主控停机或超大数据报可能导致缺记录。命令采集通道采用上述落库确认及持久重试。Master → webhook 的告警及登录通知在入库后采用持久重试，重复事件不重复入队。
+常规巡检告警、登录、摘要和心跳的 Agent → Master 传输没有 ACK 或持久重传。成功发送只表示本地网络栈接受，不代表主控已存储；网络丢包、主控停机或超大数据报可能导致缺记录。命令采集通道及下述安全组件通道采用落库确认及持久重试。Master → webhook 的告警及登录通知在入库后采用持久重试，重复事件不重复入队。
+
+## 安全组件通道（v0.7.0）
+
+沿用 version=1、UDP 55555 和上述事务提交 ACK，增加 `security_event`、`component_status`。不改变配置 TCP 55556、已有身份或端口。
+
+`security_event.data` 包含 `id`、`source`、`kind`、`severity`、`message` 及可选 `path` / `details`。来源覆盖 auditd、可选 Tetragon、sudo、native_fim、ssh_auth、policies、task。auditd/Tetragon 的信封时间优先使用源记录时间。warning/error/critical 级别进入原持久 webhook 队列，普通观察事件不通知。
+
+`component_status.data` 包含 `components`、`config_hash`、`inventory`、`queue`，可能包含 `initialization_error`。组件包含启用、安装、运行、状态、版本、错误、配置 hash、应用时间及策略检查；长明细会截断，`omitted_checks` / `details_truncated` 明确表示省略。Master 保存事件及最新快照，较旧补传不会覆盖较新快照。
+
+Agent 先将每条数据加密持久化到安装目录 `state/security/outbox/`，为事件创建时的每个目标保留独立 ACK 进度。仅当全部目标确认才删除；重启后补传保持相同 ID，Master 幂等。队列容量受事件数量和 256 MiB 磁盘边界约束，满时日志来源游标不前进。
+
+`source: sudo`、`kind: io_chunk` 使用专表，分片 `details` 为 `session_id`、`generation`、`file`、`offset`、`total_size`、`complete`、`content_base64`。同一会话文件共享 generation，每片最多 24 KiB，单文件最多 64 MiB；乱序及相同内容重传可接受，冲突重叠拒绝。它不重复进入普通事件或 webhook，完整文件通过鉴权接口下载。
+
+配置仍在原加密 YAML 内新增可选 `security` 段。常驻服务校验及应用组件后才确认新修订；安装/reload 失败保留上次有效配置，状态报告错误。旧 YAML 省略该段时兼容。组件、预设、路径及限制见 [安全组件接入与配置手册](安全组件接入与配置手册.md)。

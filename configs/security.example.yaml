@@ -1,0 +1,108 @@
+# v0.7.0 组件接入初版。可以直接粘贴到“组件与主机策略”页面的 YAML。
+# 机器先按原方式运行 Agent，再通过原下发功能选择机器应用本配置。
+# TCP 配置地址/端口仍由原 agent.service 决定；此处仅设置原 UDP 上报目标。
+output_dir: /usr/local/anquan
+state_file: state/md5.json
+timezone: Asia/Shanghai
+
+login:
+  enabled: true
+  mode: trigger
+  source: journal
+  journal_command: journalctl
+  initial_lookback_hours: 24
+  timeout_seconds: 10
+  max_records: 1000
+
+# 示例使用同主控部署地址。已有不同UDP上报地址时保留实际server列表，勿覆盖。
+server: [172.22.0.27:55555]
+setup:
+  logs: /var/log/时间anquan.log
+  prom: /var/lib/node_exporter/textfile_collector/process_monitor.prom
+  interval_seconds: 300
+
+security:
+  enabled: true
+  install_missing: true
+  poll_interval_seconds: 2
+  status_interval_seconds: 30
+  max_queue_events: 10000
+
+  # 自动使用系统包管理器安装 auditd，生成专用规则，不清空其他产品规则。
+  # audit_exec 默认审计具有登录身份 auid 的外部程序执行，不覆盖所有Shell内建操作。
+  auditd:
+    enabled: true
+    audit_exec: true
+    watch_paths:
+      - /etc/passwd
+      - /etc/group
+      - /etc/shadow
+      - /etc/ssh
+      - /etc/sudoers
+      - /etc/sudoers.d
+      - /etc/crontab
+      - /etc/cron.d
+    rules: []
+
+  # 原生SHA256/权限/属主/链接监控，基线跨重启保留；Linux有inotify实时通知。
+  native_fim:
+    enabled: true
+    paths:
+      - /etc/passwd
+      - /etc/group
+      - /etc/shadow
+      - /etc/ssh
+      - /etc/sudoers
+      - /etc/sudoers.d
+      - /etc/crontab
+      - /etc/cron.d
+    poll_interval_seconds: 30
+    report_changes: false
+    max_diff_bytes: 8192
+
+  # 与原有成功登录通知独立：失败事件入库，5分钟同IP达5次产生告警。
+  ssh_auth:
+    enabled: true
+    poll_interval_seconds: 5
+    initial_lookback_seconds: 300
+    alert_threshold: 5
+    window_seconds: 300
+
+  sudo:
+    enabled: true
+    io_logging: true
+    upload_io: false             # 需要平台下载录制文件时开启
+    max_session_bytes: 20971520  # 每会话20MiB上传上限
+    grants: []                  # 仅enforce应用；不撤销其他sudoers里的广泛授权
+    # grants:
+    #   - user: ubuntu
+    #     run_as: root
+    #     commands: [/usr/bin/systemctl status agent.service]
+    #     nopasswd: false
+
+  # 可选增强。启用时默认官方HTTPS下载并校验，支持amd64/arm64且要求内核BTF。
+  # 安装已有版本不会自动升级；自定义download_url必须配置可信sha256。
+  tetragon:
+    enabled: false
+    version: v1.7.1
+    download_url: ""
+    sha256: ""
+    config: ""
+    tracing_policy: ""
+
+  # audit只检查主机策略；组件安装和日志采集配置仍正常初始化。
+  # 切换enforce后，下列启用的具体策略才会修改系统配置。
+  policies:
+    mode: audit
+    ssh:
+      enabled: false
+      password_authentication: "no"
+      permit_root_login: prohibit-password
+      allow_users: []
+      allow_sources: []
+    sysctl: {}
+    session_timeout_seconds: 0
+    disable_ctrl_alt_del: false
+    grub:
+      enabled: false
+      password_hash: ""

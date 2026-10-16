@@ -2,6 +2,7 @@ package audit
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -84,7 +85,11 @@ func serveRuntime(ctx context.Context, c Config, writer io.Writer, version strin
 		}
 		workerCtx, cancel := context.WithCancel(ctx)
 		var workers sync.WaitGroup
-		workers.Add(3)
+		workers.Add(4)
+		go func() {
+			defer workers.Done()
+			securityLoop(workerCtx, cfg, writer)
+		}()
 		go func() {
 			defer workers.Done()
 			heartbeatLoop(workerCtx, cfg, writer, version, heartbeatInterval)
@@ -189,9 +194,25 @@ func serveRuntime(ctx context.Context, c Config, writer io.Writer, version strin
 			// Old workers must release history cursor locks before the next set
 			// starts. Cache failure restarts the original workers unchanged.
 			stopWorkers()
+			if next.Security != nil || c.Security != nil {
+				if err := applySecurityComponents(ctx, next, writer); err != nil {
+					if nextUnlock != nil {
+						nextUnlock()
+					}
+					stopWorkers = startWorkers(c)
+					update.result <- err
+					continue
+				}
+			}
 			if err := update.commit(); err != nil {
 				if nextUnlock != nil {
 					nextUnlock()
+				}
+				if next.Security != nil || c.Security != nil {
+					if restoreErr := applySecurityComponents(ctx, c, writer); restoreErr != nil {
+						err = errors.Join(err, fmt.Errorf("previous component configuration restoration failed: %w", restoreErr))
+						_ = LifecycleLog(c, writer, "security_rollback_failed", map[string]string{"error": restoreErr.Error()})
+					}
 				}
 				stopWorkers = startWorkers(c)
 				update.result <- err
