@@ -25,6 +25,7 @@ type Config struct {
 	MD5               MD5Config                `json:"md5" yaml:"md5"`
 	Login             LoginConfig              `json:"login" yaml:"login"`
 	History           *HistoryConfig           `json:"history,omitempty" yaml:"history,omitempty"`
+	Security          *SecurityConfig          `json:"security,omitempty" yaml:"security,omitempty"`
 	Existence         ExistenceConfig          `json:"existence" yaml:"existence"`
 	FilesMonitoring   *FilesMonitoringConfig   `json:"FilesMonitoring,omitempty" yaml:"FilesMonitoring,omitempty"`
 	ProcessMonitoring *ProcessMonitoringConfig `json:"ProcessMonitoring,omitempty" yaml:"ProcessMonitoring,omitempty"`
@@ -91,7 +92,7 @@ func decodeYAML(data []byte) (Config, error) {
 	if err := yaml.Unmarshal(data, &keys); err != nil {
 		return c, fmt.Errorf("YAML configuration: %w", err)
 	}
-	for _, key := range []string{"FilesMonitoring", "ProcessMonitoring", "server", "setup", "history"} {
+	for _, key := range []string{"FilesMonitoring", "ProcessMonitoring", "server", "setup", "history", "security"} {
 		if value, exists := keys[key]; exists {
 			if value.Tag == "!!null" {
 				return c, fmt.Errorf("%s cannot be null; omit the field to disable it", key)
@@ -384,6 +385,9 @@ func normalizeConfig(c Config, base string, rules pathRules) (Config, error) {
 		return c, err
 	}
 	if err := normalizeHistory(&c, base, rules); err != nil {
+		return c, err
+	}
+	if err := normalizeSecurity(&c, base, rules); err != nil {
 		return c, err
 	}
 	return c, nil

@@ -1,0 +1,143 @@
+# Anqu Agent 基础字段中文注释版，v0.6.6 起提供，v0.7.0 继续兼容。
+# v0.7.0 新增 security 组件配置另见 security.example.yaml 及安全组件接入与配置手册。
+# 配套逐项说明、运行场景、生效步骤：../docs/YAML配置说明与示例.md
+#
+# 使用方法：
+# 1. 按目标 Linux 节点调整文件路径和进程完整命令。
+# 2. 需要平台查看结果时，把 server: [] 换成实际接收主控列表。
+# 3. 在“管理设置 → Age 配置加密”粘贴 YAML，点击“下发配置”并选择机器。
+# 4. 等待目标显示“已应用”，再查看 Agent 下一轮日志和主控安全事件。
+# 本地回退方式：页面“加密配置”后下载 config.age，放在程序旁并重启服务。
+# 主控配置优先于本地 config.age；已有主控分配时，改本地文件不会覆盖它。
+#
+# YAML 基本写法：每层缩进两个空格，不用 Tab；“- ”表示列表的一项。
+# 字段区分大小写，FilesMonitoring、ProcessMonitoring、Process、fils 必须原样写。
+# fils 是本程序定义的字段名，不要改成 files。
+# 路径和命令都建议用单引号；引号不能改变程序对 | 和 , 的分隔规则。
+# 同名顶层段只出现一次；添加规则应在对应列表下添加“- ”。
+
+# Agent 数据目录，不是被监控的业务目录；程序自动建目录，但须有写入权限。
+output_dir: /usr/local/anquan
+
+# 相对 output_dir 解析，实际为 /usr/local/anquan/state/md5.json。
+# 新文件基线：md5.json.files；进程基线：md5.json.processes。
+# 登录游标：md5.json.logins；启用命令采集后还有 md5.json.commands。
+# 状态内容加密，即使文件名带 .json，也不要当普通 JSON 修改或删除。
+state_file: state/md5.json
+
+# 巡检结果中的时间显示时区；日志外层时间及每天切日志固定用北京时间 UTC+8。
+# 不会修改 Linux 系统时区。history.timezone 是另一个独立配置。
+timezone: Asia/Shanghai
+
+# 文件监控：删除整个 FilesMonitoring 段可关闭新文件监控。
+# 不要写 FilesMonitoring: {} 或 FilesMonitoring: null 来关闭。
+FilesMonitoring:
+  # 指定文件，也接受目录；目录会递归检查普通文件。
+  # 同一行的 | 表示每个路径都检查，逗号之后可追加一个或多个正常 MD5。
+  fils:
+    - '/etc/ssh/sshd_config|/etc/ssh/ssh_config'
+    # 业务文件示例：存在且确实需要监控时再取消注释。
+    # - '/opt/app/config/application.yaml'
+
+    # MD5 示例仅演示格式，使用前以实际 md5sum 输出替换。
+    # 两个文件共用整行的正常值集合，不按顺序配对。
+    # 命中任意正常值即放行；首次未知值建基线，后续未知内容变化才告警。
+    # - '/opt/app/a.conf|/opt/app/b.conf,d41d8cd98f00b204e9800998ecf8427e,900150983cd24fb0d6963f7d28e17f72'
+
+  # 递归检查目录下普通文件的内容和增删；不需要写 recursive。
+  dir:
+    - '/etc/cron.d/'
+    # - '/opt/app/config/'
+
+  # 格式是“精确文件名,搜索根目录1|搜索根目录2[,正常MD5...]”。
+  # 下例找到 /root、/home 内所有名字恰好为 authorized_keys 的普通文件。
+  # 找不到会产生 not_found；目标机器不要求存在此文件时，删除整个 search 子段。
+  search:
+    - 'authorized_keys,/root|/home'
+
+# 文件生效逻辑：当前 Agent 进程第一次完整扫描建立基线。
+# 之后与上一次成功扫描比较：新增 added、修改 modified、删除 deleted。
+# 一次修改在发现轮次告警，后续不再变化则恢复正常；不是一直与最初内容比较。
+# 必需路径缺失会每轮 missing；搜索无结果会每轮 not_found。
+# 重启、应用新配置会重建文件/进程基线；停机期间的内容变化被接受为新基线。
+# 周期采样无法保证发现两轮之间发生又恢复的短暂变化。
+
+# 进程监控：这里先只检查必须运行的进程，减少临时进程变化告警。
+# Linux 专用；删除整个 ProcessMonitoring 段可关闭。
+ProcessMonitoring:
+  exists:
+    # 必须按目标机器 /proc/<PID>/cmdline 实际完整命令修改。
+    # 下例只是常见写法；参数不同或进程改写了标题时可能不匹配。
+    - '/usr/sbin/sshd -D'
+
+    # 每行是一项独立要求；一行中的 | 表示任意一个命令运行即可满足。
+    # 多个系统启动形式可写在同一行，不要拆成两条“必须同时运行”的规则。
+    # - '/opt/app/bin/worker --config /etc/app.yaml|/usr/local/bin/worker --config /etc/app.yaml'
+
+  # 保持下面 Process 段为注释，就只做 exists 存活检查。
+  # Process: {} 会开启全机进程增删和实例数量变化监控，不能用来关闭。
+  # 仅确实需要全机变化审计时，取消下面三行的注释：
+  # Process:
+  #   whitelist:
+  #     - '/usr/sbin/sshd -D'
+  # whitelist 只抑制指定完整命令的变化告警，不免除 exists 存活检查。
+  # 不支持 *、正则、命令前缀匹配；同一命令实例从 2 个变 1 个也属于减少。
+  # 未启用 Process 时，日志仍记录完整进程清单，但不会对全机清单变化告警。
+
+# 成功 SSH 登录采集：按巡检周期读取，不是每秒独立采集。
+login:
+  enabled: true
+  source: journal
+  journal_command: journalctl  # 可执行程序名或路径，不要在这里追加命令参数。
+  initial_lookback_hours: 24    # 第一次回看 24 小时；以后按持久游标继续。
+  timeout_seconds: 10          # 单次采集命令超时，单位秒，允许 1–3600。
+  max_records: 1000            # 每轮分页上限，允许 1–100000；积压下轮继续。
+  # journal 按候选日志事件、authlog 按物理行计数，不保证每轮产出这么多登录。
+
+  # journal：需要 journalctl 和读取系统日志权限，不用填写 path。
+  # authlog：改 source 为 authlog，并添加实际日志路径：
+  # path: /var/log/auth.log    # 有些系统为 /var/log/secure。
+  # jsonl：改 source 为 jsonl，path 填自定义成功登录 JSONL 文件。
+  # wtmp：改 source 为 wtmp，path 填 /var/log/wtmp，可添加 last_command: last。
+  # 要关闭成功登录采集，设置 enabled: false；直接省略 login 会默认开启。
+
+# 操作命令采集默认关闭。仅设置 true 不会自动在系统中安装命令记录脚本。
+# 开启条件：已有按约定格式持续追加的 history.log、server 非空、Master 支持 ACK。
+history:
+  enabled: false
+  path: /var/log/history.log
+  timezone: Local          # 按日志生产脚本使用的节点时区解释时间。
+  poll_interval_ms: 1000    # 追平后每秒检查，单位毫秒，允许 100–60000。
+  max_records: 100          # 每批最多处理 1–1000 个物理行，空行也计数。
+# 首次从文件头连续分批补传；已有游标时改 path/timezone 须处理来源迁移。
+# 开启后与 setup.interval_seconds 独立。所有 server 都确认入库后才推进下一批。
+# 没有记录脚本、没有生成对应日志的命令，Agent 无法自动补获。
+# 普通操作命令只入库，不自动触发告警通知。
+
+# UDP 上报接收主控。空列表只保留本地日志/指标，不在主控产生巡检安全事件。
+# 空列表不会关闭 TCP 配置连接；history.enabled: true 时不允许列表为空。
+server: []
+# 要在平台接收数据，用下列内容替换上面的 server: []，不要同时保留两段：
+# server:
+#   - '172.22.0.27:55555'
+#   - '192.168.0.2:55555'   # 多主控时，每台都接收，不是只选一台或故障切换。
+# 裸域名/IP 默认 UDP 55555；IPv6 带端口写 '[2001:db8::1]:55555'。
+# 不写 http://、https:// 或网页路径；这里不是 Web 页面地址。
+# TCP 配置主控独立由服务启动设置决定，新机自动服务连接 172.22.0.27:55556。
+# Agent 机器 IP 自动识别，无需 agent_ip；SSH 登录来源 IP 是另一项数据。
+
+setup:
+  # “时间”替换成北京时间 YYYYMMDD；例如 /var/log/20261014anquan.log。
+  # 也支持 {date}；必须放在文件名中。没有占位符会自动加 YYYYMMDD_ 前缀。
+  logs: '/var/log/时间anquan.log'
+
+  # 每轮原子覆盖同一 .prom 文件，不生成每轮一个新文件。
+  # 此配置只生成指标文件；node_exporter 必须另外启用 textfile collector。
+  # 此文件指标为 anqu_snapshot_*；output_dir/textfile/anqu.prom 为 anqu_*。
+  prom: /var/lib/node_exporter/textfile_collector/process_monitor.prom
+
+  # 常驻 -service 模式每 300 秒巡检。启动取得有效配置后先执行一轮。
+  # 允许 1–86400 秒；登录跟随此周期，命令采集和 30 秒心跳不受此值影响。
+  interval_seconds: 300
+# 所有相对路径以 Agent 可执行程序目录为基准，只有 state_file 以 output_dir 为基准。
+# 不展开 ~、$HOME、环境变量或路径通配符。未知字段和非法 MD5 会拒绝应用。

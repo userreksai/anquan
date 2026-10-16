@@ -1,4 +1,6 @@
-# Anqu 安全检测 Agent（v0.6.9）
+# Anqu 安全检测 Agent（v0.7.0）
+
+v0.7.0 增加可通过原配置链路管理的安全组件：auditd、sudo、可选 Tetragon，以及原生持久基线 FIM、SSH 失败检测和任务执行记录。前端新增“组件与主机策略”，不改变 TCP 55556 配置连接、UDP 55555 上报和现有机器身份。组件自动安装、配置校验、重载、失败回滚及实际状态回报已接入。完整使用方式、默认值、生成文件、功能边界和验收方法见 [安全组件接入与配置手册](docs/安全组件接入与配置手册.md)，可直接下发 [初版完整配置](configs/security.example.yaml)。
 
 Anqu 在 Linux 节点持续检查文件 MD5、文件增删和进程变化，并逐条记录成功的 SSH 登录。服务启动时记录当前时间，每轮将当前主机的完整检测结果和告警写入日志，并更新固定路径的 Prometheus 文件。运行日志按北京时间零点切换文件，不再生成时间戳命名的单轮 JSON 报告。
 
@@ -88,6 +90,8 @@ go run ./cmd/anqu-build -config ./demo/config.yaml -output ./demo/anqu.exe -goos
 Linux 普通启动会安装到标准目录，需在测试节点以 root 验证。生产进程监控依赖 Linux `/proc`。演示登录记录是固定测试数据，JSONL 首轮读取其中尚未记录的条目。
 
 ## 配置格式
+
+第一次配置建议阅读 [YAML 配置说明与完整示例](docs/YAML配置说明与示例.md)，其中逐项说明字段、检测逻辑、生效步骤和验证效果；可直接编辑 [中文注释版 YAML](configs/config.annotated.yaml)。
 
 完整中文模板见 [config.example.yaml](configs/config.example.yaml)。字段区分大小写：`FilesMonitoring`、`ProcessMonitoring`、`Process`、`fils` 均按以下拼写。每条路径/命令规则是一个 YAML 字符串；使用空格缩进。未知字段、非法 MD5、重复规则及多个 YAML 文档会被拒绝。
 

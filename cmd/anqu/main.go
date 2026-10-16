@@ -18,7 +18,7 @@ import (
 	"anqu/internal/sealed"
 )
 
-const version = "0.6.9"
+const version = "0.7.0"
 
 func main() {
 	os.Exit(runPrepared(os.Args[1:], os.Stdout, os.Stderr, sealed.Config, os.Executable, install.Prepare))
@@ -37,9 +37,10 @@ func runPreparedWithSSH(args []string, stdout, stderr io.Writer, load func() ([]
 	service := flags.Bool("service", false, "run continuously using setup.interval_seconds")
 	scan := flags.Bool("scan", false, "run one complete file/process audit")
 	sshReport := flags.Bool("ssh-report", false, "report the current SSH login once for this invocation")
+	taskRun := flags.String("task-run", "", "record a named cron/task invocation: -task-run NAME -- /absolute/command args")
 	master := flags.String("master", os.Getenv("ANQUAN_MASTER"), "configuration Master hostname or IP, optionally comma-separated (TCP port defaults to 55556); env ANQUAN_MASTER; fresh nodes default to "+defaults.MasterAddress+"; independent of YAML UDP server list")
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: anqu [-service | -scan | -ssh-report] [-master HOST[:PORT]] [-version]\nOn a fresh Linux node, run as root without arguments to install and start agent.service using "+defaults.MasterAddress+". At the installed path, no arguments report one SSH login per invocation through agent.service; use -scan for a full audit. Use -master / ANQUAN_MASTER for explicit TCP configuration delivery. YAML server controls UDP reporting only. Without an audit configuration, -service waits for platform assignment without scanning.")
+		fmt.Fprintln(stderr, "Usage: anqu [-service | -scan | -ssh-report] [-master HOST[:PORT]] [-version]\n       anqu -task-run NAME -- /absolute/command args\nOn a fresh Linux node, run as root without arguments to install and start agent.service using "+defaults.MasterAddress+". At the installed path, no arguments report one SSH login per invocation through agent.service; use -scan for a full audit. Use -master / ANQUAN_MASTER for explicit TCP configuration delivery. YAML server controls UDP reporting only. Without an audit configuration, -service waits for platform assignment without scanning.")
 		flags.PrintDefaults()
 	}
 	if err := flags.Parse(args); err != nil {
@@ -48,7 +49,7 @@ func runPreparedWithSSH(args []string, stdout, stderr io.Writer, load func() ([]
 		}
 		return 1
 	}
-	if flags.NArg() != 0 {
+	if flags.NArg() != 0 && *taskRun == "" {
 		fmt.Fprintln(stderr, "unexpected positional arguments")
 		return 1
 	}
@@ -60,10 +61,17 @@ func runPreparedWithSSH(args []string, stdout, stderr io.Writer, load func() ([]
 		fmt.Fprintln(stderr, "-service, -scan and -ssh-report cannot be combined")
 		return 1
 	}
+	if *taskRun != "" && (*service || *scan || *sshReport) {
+		fmt.Fprintln(stderr, "-task-run cannot be combined with service, scan or SSH reporting")
+		return 1
+	}
 	path, err := executable()
 	if err != nil {
 		fmt.Fprintln(stderr, "cannot locate executable directory")
 		return 1
+	}
+	if *taskRun != "" {
+		return runTaskExecution(path, *taskRun, flags.Args(), stdout, stderr)
 	}
 	if *sshReport || (len(args) == 0 && isInstalled(path)) {
 		return reportSSHExecution(path, *master, stderr, load, requestSSH, currentCaller)
