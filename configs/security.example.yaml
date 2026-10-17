@@ -4,11 +4,14 @@
 # 已有完整配置时优先只合并 security 段，保留原 history、巡检和上报配置。
 # 本例开启原有操作命令采集，要求已有脚本持续写入 /var/log/history.log；
 # 没有命令日志的节点先将 history.enabled 设为 false。Agent 不会自动安装记录脚本。
+# Linux 启用 history 且使用默认日志源时，会备份修复已知脚本截断写法；旧会话需退出重登。
+# 仅本次已知损坏可核验后自动归档旧命令状态并续采，不覆盖其他脚本或自动重置未知截断。
 output_dir: /usr/local/anquan
 state_file: state/md5.json
 timezone: Asia/Shanghai
 
 # “安全事件 → 操作命令”来自此模块，和 Tetragon/auditd 的安全运行事件独立。
+# history 位于完整 YAML 顶层，不填写到“Tetragon 配置”输入框。
 # path、timezone 沿用原 history 配置；不要删除已有 .commands 游标。
 # output_dir、state_file 也沿用原值，避免改变命令状态文件位置。
 # Local 应与写日志脚本的 date 时区一致，不受顶层 timezone 设置影响。

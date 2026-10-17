@@ -84,14 +84,21 @@ type historyEvent struct {
 // Pending records and their next cursor are persisted together before sending.
 // A restarted process retries the same IDs until every configured master ACKs.
 type historyState struct {
-	Version    int            `json:"version"`
-	Source     string         `json:"source"`
-	Generation string         `json:"generation"`
-	Cursor     authLogCursor  `json:"cursor"`
-	Anchor     string         `json:"anchor"`
-	Pending    []historyEvent `json:"pending,omitempty"`
-	Logged     bool           `json:"logged,omitempty"`
+	Version      int                    `json:"version"`
+	Source       string                 `json:"source"`
+	Generation   string                 `json:"generation"`
+	Cursor       authLogCursor          `json:"cursor"`
+	Anchor       string                 `json:"anchor"`
+	Pending      []historyEvent         `json:"pending,omitempty"`
+	Logged       bool                   `json:"logged,omitempty"`
+	ScriptRepair *historyScriptRecovery `json:"script_repair,omitempty"`
 }
+
+// Only a change to already consumed source bytes can use the narrowly scoped
+// recovery receipt written while fixing the known shell script defect.
+type historySourceChangedError struct{ message string }
+
+func (e *historySourceChangedError) Error() string { return e.message }
 
 var historyPattern = regexp.MustCompile(`^\[([0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2})\] \[([^\]\r\n]+)\] \[([^\]\r\n]+)\] \[(.*)\]$`)
 
@@ -143,15 +150,15 @@ func readHistoryPage(c Config, s *historyState) (bool, error) {
 	}
 	cur := &s.Cursor
 	if info.Size() < cur.Offset || (cur.Identity != "" && authIdentity(info) != cur.Identity) {
-		return false, fmt.Errorf("history log replaced or truncated; preserve the log and encrypted cursor before recovery")
+		return false, &historySourceChangedError{"history log replaced or truncated; preserve the log and encrypted cursor before recovery"}
 	}
 	prefix, err := authPrefix(f, cur.PrefixBytes)
 	if err != nil || prefix != cur.Prefix {
-		return false, fmt.Errorf("history log prefix changed; refusing to skip command records")
+		return false, &historySourceChangedError{"history log prefix changed; refusing to skip command records"}
 	}
 	anchor, err := historyAnchor(f, cur.Offset)
 	if err != nil || anchor != s.Anchor {
-		return false, fmt.Errorf("history log changed before saved offset; refusing to skip command records")
+		return false, &historySourceChangedError{"history log changed before saved offset; refusing to skip command records"}
 	}
 	if _, err := f.Seek(cur.Offset, io.SeekStart); err != nil {
 		return false, err
@@ -209,9 +216,12 @@ func readHistoryPage(c Config, s *historyState) (bool, error) {
 
 type historySender func(Config, []historyEvent) error
 
-// PollHistory performs one bounded page. It uses its own lock and cursor so a
-// slow file scan cannot hold up command collection, or reset command history.
+// PollHistory initializes the known history writer and performs one bounded
+// page. Its independent lock and cursor keep file scans from delaying commands.
 func PollHistory(c Config, writer io.Writer) (bool, error) {
+	if err := initializeHistoryScript(c, writer); err != nil {
+		return false, err
+	}
 	return pollHistory(c, writer, sendHistoryEvents)
 }
 
@@ -241,19 +251,33 @@ func pollHistory(c Config, writer io.Writer, send historySender) (bool, error) {
 	} else if err != nil {
 		return false, err
 	}
-	if s.Version != 1 || s.Source != source || len(s.Generation) != 32 || s.Cursor.Offset < 0 || s.Cursor.PrefixBytes < 0 || s.Cursor.PrefixBytes > 256 || int64(s.Cursor.PrefixBytes) > s.Cursor.Offset {
+	if !validHistoryState(s, source) {
 		return false, fmt.Errorf("invalid command cursor or history source/timezone changed; preserve the encrypted .commands state before recovery")
 	}
 	more := len(s.Pending) > 0
 	if len(s.Pending) == 0 {
 		before := s.Cursor
 		more, err = readHistoryPage(c, &s)
+		var changed *historySourceChangedError
+		if errors.As(err, &changed) && s.ScriptRepair != nil {
+			recovered, recoveryErr := recoverHistoryAfterScriptRepair(c, &s, writer)
+			if recoveryErr != nil {
+				return false, recoveryErr
+			}
+			if recovered {
+				more, err = readHistoryPage(c, &s)
+			}
+		}
 		if err != nil {
 			return false, err
 		}
-		if before == s.Cursor && len(s.Pending) == 0 && exists {
+		if before == s.Cursor && len(s.Pending) == 0 && exists && s.ScriptRepair == nil {
 			return false, nil
 		}
+		// A valid source needs no reset. Consume the one-use receipt on the
+		// first successful read, including an idle read, so later unrelated
+		// truncation still stops collection.
+		s.ScriptRepair = nil
 		// The next offset and pending data form a durable encrypted outbox.
 		if err := writeState(path, "history", s); err != nil {
 			return false, err
