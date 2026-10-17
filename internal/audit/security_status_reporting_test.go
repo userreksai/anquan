@@ -72,3 +72,23 @@ func TestComponentStatusFailedEnqueueIsRetriedAndEventsAreUnaffected(t *testing.
 		t.Fatal("component status suppression affected security events")
 	}
 }
+
+func TestComponentStatusLongCheckIntervalMatchesSnapshotMetadata(t *testing.T) {
+	for checkSeconds, wantSeconds := range map[int]int{0: 300, 30: 300, 200: 400, 3600: 3600, 86400: 86400} {
+		if got := componentStatusSnapshotPeriod(checkSeconds); got != time.Duration(wantSeconds)*time.Second {
+			t.Fatalf("check interval %d advertised %s, want %d seconds", checkSeconds, got, wantSeconds)
+		}
+	}
+	reporter := componentStatusReporter{snapshotInterval: componentStatusSnapshotPeriod(3600)}
+	start := time.Now().UTC()
+	var delivered []security.Event
+	persist := func(event security.Event) error { delivered = append(delivered, event); return nil }
+	for _, delta := range []time.Duration{0, 5 * time.Minute, time.Hour} {
+		if err := reporter.emit(reportingStatus(start.Add(delta), "running", 0), persist); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(delivered) != 2 || delivered[1].Data["snapshot_interval_seconds"] != 3600 {
+		t.Fatalf("long check interval produced misleading snapshot freshness: %+v", delivered)
+	}
+}

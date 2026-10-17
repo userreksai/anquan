@@ -155,7 +155,7 @@ func securityLoop(ctx context.Context, c Config, writer io.Writer) {
 	if fimEnabled {
 		fimState = "starting"
 	}
-	statusReporter := &componentStatusReporter{}
+	statusReporter := &componentStatusReporter{snapshotInterval: componentStatusSnapshotPeriod(componentConfig(c).StatusIntervalSeconds)}
 	persist := func(event security.Event) error {
 		if err := q.enqueue(c, event); err != nil {
 			return err

@@ -360,6 +360,26 @@ func auditFields(line string) map[string]string {
 	}
 	return m
 }
+
+func routineAuditExecution(records []string) bool {
+	found := false
+	for _, record := range records {
+		for _, field := range auditFieldPattern.FindAllStringSubmatch(record, -1) {
+			if field[1] != "key" {
+				continue
+			}
+			key := strings.Trim(field[2], "\"'")
+			if key == "" || key == "(null)" {
+				continue
+			}
+			if key != "anquan_exec" {
+				return false
+			}
+			found = true
+		}
+	}
+	return found
+}
 func (m *Manager) auditLogPath() string {
 	b, err := os.ReadFile(m.path("/etc/audit/auditd.conf"))
 	if err == nil {
@@ -398,7 +418,7 @@ func (m *Manager) collectAudit(ctx context.Context, s *collectorState, emit func
 		severity := "info"
 		// A failed execve (for example a shell trying a missing PATH entry)
 		// is an ordinary execution record, not evidence of a security incident.
-		if kind != "exec" && (fields["success"] == "no" || fields["res"] == "failed") {
+		if (kind != "exec" || !routineAuditExecution(g.Records)) && (fields["success"] == "no" || fields["res"] == "failed") {
 			severity = "warning"
 		}
 		collected := newEvent("auditd", kind, severity, "Linux audit "+kind, g.ID+":"+strconv.Itoa(g.Fragment), map[string]any{"audit_id": g.AuditID, "records": g.Records, "fields": fields, "fragment": g.Fragment, "path": m.auditLogPath()})

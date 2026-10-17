@@ -13,6 +13,16 @@ import (
 
 const componentStatusSnapshotInterval = 5 * time.Minute
 
+func componentStatusSnapshotPeriod(checkSeconds int) time.Duration {
+	if checkSeconds <= 0 {
+		checkSeconds = 30
+	}
+	// Status is sampled on the configured check tick. Advertise the actual
+	// refresh period, including long or non-dividing check intervals.
+	checks := max(1, (300+checkSeconds-1)/checkSeconds)
+	return time.Duration(checks*checkSeconds) * time.Second
+}
+
 // Include native worker health after enrichment, not just the manager's own
 // components. Queue counters and sample timestamps must not create a change.
 func componentStatusFingerprint(data map[string]any) (string, error) {
@@ -48,9 +58,10 @@ func componentStatusFingerprint(data map[string]any) (string, error) {
 }
 
 type componentStatusReporter struct {
-	mu          sync.Mutex
-	fingerprint string
-	lastSent    time.Time
+	mu               sync.Mutex
+	fingerprint      string
+	lastSent         time.Time
+	snapshotInterval time.Duration
 }
 
 func (r *componentStatusReporter) emit(event security.Event, persist func(security.Event) error) error {
@@ -66,15 +77,16 @@ func (r *componentStatusReporter) emit(event security.Event, persist func(securi
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	interval := max(componentStatusSnapshotInterval, r.snapshotInterval)
 	unchanged := r.fingerprint == fingerprint
-	if unchanged && event.Time.Sub(r.lastSent) >= 0 && event.Time.Sub(r.lastSent) < componentStatusSnapshotInterval {
+	if unchanged && event.Time.Sub(r.lastSent) >= 0 && event.Time.Sub(r.lastSent) < interval {
 		return nil
 	}
 	if event.Data == nil {
 		event.Data = map[string]any{}
 	}
 	event.Data["status_reporting"] = "changes_only"
-	event.Data["snapshot_interval_seconds"] = int(componentStatusSnapshotInterval / time.Second)
+	event.Data["snapshot_interval_seconds"] = int(interval / time.Second)
 	if unchanged {
 		event.Data["snapshot_only"] = true
 	} else {

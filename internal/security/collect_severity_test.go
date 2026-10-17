@@ -33,3 +33,26 @@ func TestOrdinaryExecFailureIsNotASecurityWarning(t *testing.T) {
 		t.Fatalf("failed execution evidence was lost: %+v", fields)
 	}
 }
+
+func TestCustomAuditExecutionFailuresKeepTheirWarning(t *testing.T) {
+	for _, records := range [][]string{
+		{`type=SYSCALL msg=audit(1700000000.001:1): success=no key="anquan_exec_denied"`},
+		{`type=SYSCALL msg=audit(1700000000.001:1): success=no key="anquan_exec" key="anquan_exec_denied"`},
+		{`type=SYSCALL msg=audit(1700000000.001:1): success=no key="anquan_exec_denied"`, `type=EXECVE msg=audit(1700000000.001:1): key="anquan_exec"`},
+	} {
+		m, _ := testManager(t, Config{Enabled: true, Auditd: AuditdConfig{Enabled: true}})
+		log := ""
+		for _, record := range records {
+			log += record + "\n"
+		}
+		log += "type=EOE msg=audit(1700000000.001:1):\n"
+		put(t, m, "/var/log/audit/audit.log", []byte(log))
+		var events []Event
+		if err := m.Poll(context.Background(), func(event Event) error { events = append(events, event); return nil }); err != nil {
+			t.Fatal(err)
+		}
+		if len(events) != 1 || events[0].Data["severity"] != "warning" {
+			t.Fatalf("custom audit rule warning suppressed: %+v", events)
+		}
+	}
+}
