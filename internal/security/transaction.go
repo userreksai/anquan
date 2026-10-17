@@ -29,12 +29,24 @@ type manifest struct {
 	ReferencedFiles            map[string]string `json:"referenced_files,omitempty"`
 	Options                    []string          `json:"options,omitempty"`
 	AuditKeys                  []string          `json:"audit_keys,omitempty"`
+	AuditRules                 map[string]bool   `json:"audit_rules,omitempty"`
+	AuditRulesTracked          bool              `json:"audit_rules_tracked,omitempty"`
 	Sysctl                     map[string]string `json:"sysctl,omitempty"`
 	SysctlOriginal             map[string]string `json:"sysctl_original,omitempty"`
 	CtrlAltDelMasked           bool              `json:"ctrl_alt_del_masked"`
 	CtrlAltDelOriginallyMasked bool              `json:"ctrl_alt_del_originally_masked"`
 	Firewall                   bool              `json:"firewall"`
 	AppliedAt                  *time.Time        `json:"applied_at,omitempty"`
+}
+
+func cloneAuditRules(rules map[string]bool) map[string]bool {
+	copy := make(map[string]bool, len(rules))
+	for rule, owned := range rules {
+		if owned {
+			copy[rule] = true
+		}
+	}
+	return copy
 }
 
 func (m manifest) configuredFiles() map[string]string {

@@ -176,7 +176,7 @@ func TestSysctlOriginalValuesRestoredOnDisable(t *testing.T) {
 		t.Fatalf("original runtime value lost: %q", r.values["kernel.kptr_restrict"])
 	}
 }
-func TestAuditCleanupOnlyDeletesOwnedKeys(t *testing.T) {
+func TestAuditCleanupPreservesAdministratorFiles(t *testing.T) {
 	m, r := testManager(t, Config{Enabled: true, Auditd: AuditdConfig{Enabled: true, AuditExec: true}})
 	put(t, m, "/etc/audit/rules.d/admin.rules", []byte("-w /etc/passwd -p wa -k admin\n"))
 	if _, err := m.Apply(context.Background()); err != nil {
@@ -186,17 +186,14 @@ func TestAuditCleanupOnlyDeletesOwnedKeys(t *testing.T) {
 	if _, err := m.Apply(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	found := false
 	for _, call := range r.calls {
-		if call == "auditctl -D" {
-			t.Fatal("all audit rules were cleared")
-		}
-		if call == "auditctl -D -k anquan_exec" {
-			found = true
+		if strings.HasPrefix(call, "auditctl -D") {
+			t.Fatal("audit rules were cleared in bulk")
 		}
 	}
-	if !found {
-		t.Fatal("old runtime audit rules were not removed")
+	state, err := m.loadManifest()
+	if err != nil || len(state.AuditRules) != 0 {
+		t.Fatalf("disabled agent retained runtime rule ownership: %#v %v", state.AuditRules, err)
 	}
 	if _, err := os.Stat(m.path("/etc/audit/rules.d/admin.rules")); err != nil {
 		t.Fatal(err)
