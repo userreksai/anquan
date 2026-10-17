@@ -43,23 +43,45 @@ func (m *Manager) Apply(ctx context.Context) ([]ComponentStatus, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read security manifest: %w", err)
 	}
+	_, manifestErr := os.Lstat(m.manifestPath())
+	hadManifest := manifestErr == nil
 	var interrupted transactionJournal
 	if err = readPrivateJSON(m.journalPath(), "security-transaction", &interrupted); err == nil {
 		if err = m.restore(interrupted.Before); err != nil {
 			return nil, fmt.Errorf("recover interrupted security transaction: %w", err)
 		}
-		if err = m.activate(ctx, interrupted.Next, interrupted.Previous, interrupted.Dirty); err != nil {
+		if err = m.trackLegacyAuditRules(&interrupted.Previous); err != nil {
+			return nil, fmt.Errorf("recover previous audit ownership: %w", err)
+		}
+		restored := interrupted.Previous
+		restored.AuditRules = cloneAuditRules(interrupted.Next.AuditRules)
+		if !interrupted.Next.AuditRulesTracked {
+			restored.AuditRules = cloneAuditRules(interrupted.Previous.AuditRules)
+		}
+		restored.AuditRulesTracked = true
+		saveRecovery := func() error {
+			interrupted.Next.AuditRules = restored.AuditRules
+			interrupted.Next.AuditRulesTracked = true
+			return writePrivateJSON(m.journalPath(), "security-transaction", interrupted)
+		}
+		if err = m.activate(ctx, interrupted.Next, restored, interrupted.Dirty, saveRecovery); err != nil {
 			return nil, fmt.Errorf("recover previous security services: %w", err)
 		}
-		previous = interrupted.Previous
+		previous = restored
 		if err = writePrivateJSON(m.manifestPath(), "security-managed", previous); err != nil {
 			return nil, err
 		}
 		if err = os.Remove(m.journalPath()); err != nil {
 			return nil, err
 		}
+		hadManifest = true
 	} else if !os.IsNotExist(err) {
 		return nil, fmt.Errorf("read security transaction: %w", err)
+	}
+	// Old manifests tracked only keys. Recover complete rules only from the
+	// exact file whose ownership and contents that manifest proves.
+	if err = m.trackLegacyAuditRules(&previous); err != nil {
+		return m.failed("auditd", err)
 	}
 	if m.Config.Enabled {
 		if m.Config.Auditd.Enabled {
@@ -92,7 +114,7 @@ func (m *Manager) Apply(ctx context.Context) ([]ComponentStatus, error) {
 	if err != nil {
 		return m.failed("security", err)
 	}
-	next := manifest{Files: map[string]string{}, ReferencedFiles: map[string]string{}, Options: options, CtrlAltDelMasked: m.Config.Enabled && m.Config.Policies.Mode == "enforce" && m.Config.Policies.DisableCtrlAltDel, Firewall: desired[firewallConfigPath].Data != nil}
+	next := manifest{Files: map[string]string{}, ReferencedFiles: map[string]string{}, AuditRules: cloneAuditRules(previous.AuditRules), AuditRulesTracked: true, Options: options, CtrlAltDelMasked: m.Config.Enabled && m.Config.Policies.Mode == "enforce" && m.Config.Policies.DisableCtrlAltDel, Firewall: desired[firewallConfigPath].Data != nil}
 	for p, f := range desired {
 		next.Files[p] = hashString(string(f.Data))
 	}
@@ -116,9 +138,6 @@ func (m *Manager) Apply(ctx context.Context) ([]ComponentStatus, error) {
 	if next.CtrlAltDelMasked && !previous.CtrlAltDelMasked {
 		out, _ := m.Runner.Run(ctx, "systemctl", "is-enabled", "ctrl-alt-del.target")
 		next.CtrlAltDelOriginallyMasked = strings.TrimSpace(out) == "masked"
-	}
-	if rules, ok := desired[auditRulesPath]; ok {
-		next.AuditKeys = auditRuleKeys(string(rules.Data))
 	}
 	next.Sysctl = map[string]string{}
 	next.SysctlOriginal = map[string]string{}
@@ -161,7 +180,16 @@ func (m *Manager) Apply(ctx context.Context) ([]ComponentStatus, error) {
 		rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Minute)
 		defer cancel()
 		rerr := m.restore(tx.before)
-		rerr = errors.Join(rerr, m.activate(rollbackCtx, next, previous, dirty))
+		restored := previous
+		restored.AuditRules = cloneAuditRules(next.AuditRules)
+		restored.AuditRulesTracked = true
+		tx.next.AuditRules = restored.AuditRules
+		if rerr == nil {
+			rerr = m.activate(rollbackCtx, next, restored, dirty, tx.save)
+		}
+		if rerr == nil && (hadManifest || len(restored.AuditRules) > 0) {
+			rerr = writePrivateJSON(m.manifestPath(), "security-managed", restored)
+		}
 		if rerr == nil {
 			_ = os.Remove(m.journalPath())
 		}
@@ -214,7 +242,7 @@ func (m *Manager) Apply(ctx context.Context) ([]ComponentStatus, error) {
 	if err = m.validateFiles(ctx, desired); err != nil {
 		return rollback(err)
 	}
-	if err = m.activate(ctx, previous, next, dirty); err != nil {
+	if err = m.activate(ctx, previous, next, dirty, tx.save); err != nil {
 		return rollback(err)
 	}
 	next.AppliedAt = timePtr()
@@ -498,20 +526,9 @@ func parseSettings(raw string) map[string]string {
 	}
 	return m
 }
-func (m *Manager) loadAudit(ctx context.Context) error {
-	if _, err := os.Stat(m.path(auditRulesPath)); os.IsNotExist(err) {
-		return nil
-	} else if err != nil {
-		return err
-	}
-	// Runtime loading is restricted to this product's additive rules. The
-	// distribution's boot-time loader picks up the persistent rules.d file.
-	_, err := m.Runner.Run(ctx, "auditctl", "-R", m.path(auditRulesPath))
-	return err
-}
-func (m *Manager) activate(ctx context.Context, previous, next manifest, dirty ...map[string]bool) error {
+func (m *Manager) activate(ctx context.Context, previous, next manifest, dirty map[string]bool, save func() error) error {
 	previousFiles, nextFiles := previous.configuredFiles(), next.configuredFiles()
-	changed := func(p string) bool { return previousFiles[p] != nextFiles[p] || (len(dirty) > 0 && dirty[0][p]) }
+	changed := func(p string) bool { return previousFiles[p] != nextFiles[p] || dirty[p] }
 	if changed(auditRulesPath) {
 		if _, err := m.Runner.Run(ctx, "systemctl", "enable", "--now", "auditd"); err != nil && nextFiles[auditRulesPath] != "" {
 			return err
@@ -521,12 +538,7 @@ func (m *Manager) activate(ctx context.Context, previous, next manifest, dirty .
 		} else if strings.Contains(out, "enabled 2") {
 			return errors.New("kernel audit policy is immutable; reboot with an editable policy before applying configuration")
 		}
-		for _, key := range previous.AuditKeys {
-			if _, err := m.Runner.Run(ctx, "auditctl", "-D", "-k", key); err != nil {
-				return err
-			}
-		}
-		if err := m.loadAudit(ctx); err != nil {
+		if err := m.reconcileAudit(ctx, next.AuditRules, save, nextFiles[auditRulesPath] != ""); err != nil {
 			return err
 		}
 	}
@@ -612,18 +624,6 @@ func (m *Manager) activate(ctx context.Context, previous, next manifest, dirty .
 		}
 	}
 	return nil
-}
-func auditRuleKeys(raw string) []string {
-	keys := map[string]bool{}
-	for _, line := range strings.Split(raw, "\n") {
-		f := strings.Fields(line)
-		for i := 0; i+1 < len(f); i++ {
-			if f[i] == "-k" {
-				keys[f[i+1]] = true
-			}
-		}
-	}
-	return sortedKeys(keys)
 }
 func (m *Manager) reloadSSH(ctx context.Context) error {
 	for _, service := range []string{"sshd", "ssh"} {
