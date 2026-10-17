@@ -92,9 +92,25 @@ func (m *Manager) Apply(ctx context.Context) ([]ComponentStatus, error) {
 	if err != nil {
 		return m.failed("security", err)
 	}
-	next := manifest{Files: map[string]string{}, Options: options, CtrlAltDelMasked: m.Config.Enabled && m.Config.Policies.Mode == "enforce" && m.Config.Policies.DisableCtrlAltDel, Firewall: desired[firewallConfigPath].Data != nil}
+	next := manifest{Files: map[string]string{}, ReferencedFiles: map[string]string{}, Options: options, CtrlAltDelMasked: m.Config.Enabled && m.Config.Policies.Mode == "enforce" && m.Config.Policies.DisableCtrlAltDel, Firewall: desired[firewallConfigPath].Data != nil}
 	for p, f := range desired {
 		next.Files[p] = hashString(string(f.Data))
+	}
+	// A missing ownership record is not permission to replace an existing file.
+	// Reuse an exact match without acquiring ownership, including after state
+	// loss. Keep this before the equality fast path so references are rechecked.
+	for _, p := range sortedKeys(desired) {
+		if previous.Files[p] != "" {
+			continue
+		}
+		exists, err := m.referenceExistingFile(p, desired[p])
+		if err != nil {
+			return m.failed("security", err)
+		}
+		if exists {
+			next.ReferencedFiles[p] = next.Files[p]
+			delete(next.Files, p)
+		}
 	}
 	next.CtrlAltDelOriginallyMasked = previous.CtrlAltDelOriginallyMasked
 	if next.CtrlAltDelMasked && !previous.CtrlAltDelMasked {
@@ -125,7 +141,7 @@ func (m *Manager) Apply(ctx context.Context) ([]ComponentStatus, error) {
 	for p, f := range desired {
 		info, e := os.Stat(m.path(p))
 		b, err := os.ReadFile(m.path(p))
-		if e != nil || err != nil || !bytes.Equal(b, f.Data) || info.Mode().Perm() != f.Mode {
+		if e != nil || err != nil || !bytes.Equal(b, f.Data) || !managedModeMatches(info.Mode(), f.Mode) {
 			equal = false
 			dirty[p] = true
 		}
@@ -134,17 +150,6 @@ func (m *Manager) Apply(ctx context.Context) ([]ComponentStatus, error) {
 		m.appliedAt = previous.AppliedAt
 		m.statuses = m.baseStatuses(ctx)
 		return append([]ComponentStatus(nil), m.statuses...), nil
-	}
-	// Every path belongs to this module. Do not adopt or delete pre-existing
-	// administrator drop-ins merely because they happen to use the same name.
-	for p := range desired {
-		if previous.Files[p] == "" {
-			if _, e := os.Lstat(m.path(p)); e == nil {
-				return m.failed("security", fmt.Errorf("managed path %s already exists without agent ownership", p))
-			} else if !os.IsNotExist(e) {
-				return m.failed("security", e)
-			}
-		}
 	}
 	tx := &transaction{manager: m, touched: map[string]bool{}, previous: previous, next: next, dirty: dirty}
 	// Save runtime sysctl values before the first write, so rollback restores the
@@ -171,9 +176,35 @@ func (m *Manager) Apply(ctx context.Context) ([]ComponentStatus, error) {
 	}
 	for _, p := range sortedKeys(desired) {
 		f := desired[p]
+		if next.ReferencedFiles[p] != "" {
+			exists, err := m.referenceExistingFile(p, f)
+			if err != nil {
+				return rollback(err)
+			}
+			if !exists {
+				return rollback(fmt.Errorf("referenced configuration disappeared during apply: %s", p))
+			}
+			continue
+		}
+		if previous.Files[p] == "" {
+			// The file may have appeared since preflight. Do not grant ownership
+			// or overwrite it just because the earlier check saw no file.
+			exists, err := m.referenceExistingFile(p, f)
+			if err != nil {
+				return rollback(err)
+			}
+			if exists {
+				next.ReferencedFiles[p] = next.Files[p]
+				delete(next.Files, p)
+				if err := tx.save(); err != nil {
+					return rollback(err)
+				}
+				continue
+			}
+		}
 		existing, e := os.ReadFile(m.path(p))
 		info, statErr := os.Stat(m.path(p))
-		if e == nil && statErr == nil && bytes.Equal(existing, f.Data) && info.Mode().Perm() == f.Mode {
+		if e == nil && statErr == nil && bytes.Equal(existing, f.Data) && managedModeMatches(info.Mode(), f.Mode) {
 			continue
 		}
 		if err = tx.change(p, &f); err != nil {
@@ -215,11 +246,16 @@ func (m *Manager) baseStatuses(ctx context.Context) []ComponentStatus {
 	return s
 }
 func manifestsEqual(a, b manifest) bool {
-	if len(a.Files) != len(b.Files) || a.CtrlAltDelMasked != b.CtrlAltDelMasked || a.Firewall != b.Firewall {
+	if len(a.Files) != len(b.Files) || len(a.ReferencedFiles) != len(b.ReferencedFiles) || a.CtrlAltDelMasked != b.CtrlAltDelMasked || a.Firewall != b.Firewall {
 		return false
 	}
 	for k, v := range a.Files {
 		if b.Files[k] != v {
+			return false
+		}
+	}
+	for p, referenced := range a.ReferencedFiles {
+		if b.ReferencedFiles[p] != referenced {
 			return false
 		}
 	}
@@ -474,9 +510,10 @@ func (m *Manager) loadAudit(ctx context.Context) error {
 	return err
 }
 func (m *Manager) activate(ctx context.Context, previous, next manifest, dirty ...map[string]bool) error {
-	changed := func(p string) bool { return previous.Files[p] != next.Files[p] || (len(dirty) > 0 && dirty[0][p]) }
+	previousFiles, nextFiles := previous.configuredFiles(), next.configuredFiles()
+	changed := func(p string) bool { return previousFiles[p] != nextFiles[p] || (len(dirty) > 0 && dirty[0][p]) }
 	if changed(auditRulesPath) {
-		if _, err := m.Runner.Run(ctx, "systemctl", "enable", "--now", "auditd"); err != nil && next.Files[auditRulesPath] != "" {
+		if _, err := m.Runner.Run(ctx, "systemctl", "enable", "--now", "auditd"); err != nil && nextFiles[auditRulesPath] != "" {
 			return err
 		}
 		if out, err := m.Runner.Run(ctx, "auditctl", "-s"); err != nil {
@@ -494,7 +531,7 @@ func (m *Manager) activate(ctx context.Context, previous, next manifest, dirty .
 		}
 	}
 	tetragonChanged := false
-	for _, files := range []map[string]string{previous.Files, next.Files} {
+	for _, files := range []map[string]string{previousFiles, nextFiles} {
 		for p := range files {
 			if (strings.Contains(p, "tetragon.conf.d/") || strings.Contains(p, "tetragon.tp.d/") || strings.Contains(p, "tetragon.service.d/")) && changed(p) {
 				tetragonChanged = true
@@ -505,7 +542,7 @@ func (m *Manager) activate(ctx context.Context, previous, next manifest, dirty .
 		if _, err := m.Runner.Run(ctx, "systemctl", "daemon-reload"); err != nil {
 			return err
 		}
-		if next.Files["/etc/systemd/system/tetragon.service.d/90-anquan.conf"] != "" {
+		if nextFiles["/etc/systemd/system/tetragon.service.d/90-anquan.conf"] != "" {
 			if _, err := m.Runner.Run(ctx, "systemctl", "enable", "tetragon"); err != nil {
 				return err
 			}

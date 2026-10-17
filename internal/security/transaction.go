@@ -23,7 +23,10 @@ type snapshot struct {
 	Mode   os.FileMode `json:"mode"`
 }
 type manifest struct {
-	Files                      map[string]string `json:"files"`
+	Files map[string]string `json:"files"`
+	// Identical pre-existing files may be used, but are never owned by us.
+	// They must not be overwritten or deleted on a later configuration change.
+	ReferencedFiles            map[string]string `json:"referenced_files,omitempty"`
 	Options                    []string          `json:"options,omitempty"`
 	AuditKeys                  []string          `json:"audit_keys,omitempty"`
 	Sysctl                     map[string]string `json:"sysctl,omitempty"`
@@ -33,6 +36,18 @@ type manifest struct {
 	Firewall                   bool              `json:"firewall"`
 	AppliedAt                  *time.Time        `json:"applied_at,omitempty"`
 }
+
+func (m manifest) configuredFiles() map[string]string {
+	files := make(map[string]string, len(m.Files)+len(m.ReferencedFiles))
+	for p, hash := range m.ReferencedFiles {
+		files[p] = hash
+	}
+	for p, hash := range m.Files {
+		files[p] = hash
+	}
+	return files
+}
+
 type transactionJournal struct {
 	Before   []snapshot      `json:"before"`
 	Previous manifest        `json:"previous"`
