@@ -1,9 +1,24 @@
-# v0.7.0 组件接入初版。可以直接粘贴到“组件与主机策略”页面的 YAML。
+# v0.7.0 组件接入示例。核对原配置和节点环境后，再在“组件与主机策略”页面合并使用。
 # 机器先按原方式运行 Agent，再通过原下发功能选择机器应用本配置。
 # TCP 配置地址/端口仍由原 agent.service 决定；此处仅设置原 UDP 上报目标。
+# 已有完整配置时优先只合并 security 段，保留原 history、巡检和上报配置。
+# 本例开启原有操作命令采集，要求已有脚本持续写入 /var/log/history.log；
+# 没有命令日志的节点先将 history.enabled 设为 false。Agent 不会自动安装记录脚本。
 output_dir: /usr/local/anquan
 state_file: state/md5.json
 timezone: Asia/Shanghai
+
+# “安全事件 → 操作命令”来自此模块，和 Tetragon/auditd 的安全运行事件独立。
+# path、timezone 沿用原 history 配置；不要删除已有 .commands 游标。
+# output_dir、state_file 也沿用原值，避免改变命令状态文件位置。
+# Local 应与写日志脚本的 date 时区一致，不受顶层 timezone 设置影响。
+# 首次启用会从头分批补传已有日志，正常命令只入库、不发送告警。
+history:
+  enabled: true
+  path: /var/log/history.log
+  timezone: Local
+  poll_interval_ms: 1000
+  max_records: 100
 
 login:
   enabled: true
