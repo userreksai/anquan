@@ -396,7 +396,9 @@ func (m *Manager) collectAudit(ctx context.Context, s *collectorState, emit func
 			}
 		}
 		severity := "info"
-		if fields["success"] == "no" || fields["res"] == "failed" {
+		// A failed execve (for example a shell trying a missing PATH entry)
+		// is an ordinary execution record, not evidence of a security incident.
+		if kind != "exec" && (fields["success"] == "no" || fields["res"] == "failed") {
 			severity = "warning"
 		}
 		collected := newEvent("auditd", kind, severity, "Linux audit "+kind, g.ID+":"+strconv.Itoa(g.Fragment), map[string]any{"audit_id": g.AuditID, "records": g.Records, "fields": fields, "fragment": g.Fragment, "path": m.auditLogPath()})

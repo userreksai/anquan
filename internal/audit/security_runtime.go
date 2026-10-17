@@ -155,6 +155,17 @@ func securityLoop(ctx context.Context, c Config, writer io.Writer) {
 	if fimEnabled {
 		fimState = "starting"
 	}
+	statusReporter := &componentStatusReporter{}
+	persist := func(event security.Event) error {
+		if err := q.enqueue(c, event); err != nil {
+			return err
+		}
+		// I/O payload stays encrypted in the outbox, not duplicated in plaintext logs.
+		if event.Data["kind"] != "io_chunk" {
+			_ = writeLog(c, writer, event.Time, event.Type, event.Data)
+		}
+		return nil
+	}
 	emit := func(event security.Event) error {
 		if event.Type == "component_status" {
 			if event.Data == nil {
@@ -178,16 +189,9 @@ func securityLoop(ctx context.Context, c Config, writer io.Writer) {
 			event.Data["queue"] = q.stats()
 			event.Data["inventory"] = inventory
 			boundSecurityStatus(event.Data, components)
+			return statusReporter.emit(event, persist)
 		}
-		if err := q.enqueue(c, event); err != nil {
-			return err
-		}
-		// I/O payload stays encrypted in the outbox, not duplicated in plaintext logs.
-		if event.Data["kind"] == "io_chunk" {
-			return nil
-		}
-		_ = writeLog(c, writer, event.Time, event.Type, event.Data)
-		return nil
+		return persist(event)
 	}
 	if c.Security == nil || !c.Security.Enabled {
 		if err := applySecurityComponents(ctx, c, writer); err != nil && ctx.Err() != nil {
