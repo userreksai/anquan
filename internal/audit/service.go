@@ -48,6 +48,10 @@ func serveWithHeartbeatInterval(ctx context.Context, c Config, writer io.Writer,
 }
 
 func serveRuntime(ctx context.Context, c Config, writer io.Writer, version string, scan func(Config, io.Writer) (Report, OutputPaths, error), heartbeatInterval time.Duration, delivery *ConfigDelivery) error {
+	return serveRuntimeWithHistoryInitializer(ctx, c, writer, version, scan, heartbeatInterval, delivery, initializeHistoryScript)
+}
+
+func serveRuntimeWithHistoryInitializer(ctx context.Context, c Config, writer io.Writer, version string, scan func(Config, io.Writer) (Report, OutputPaths, error), heartbeatInterval time.Duration, delivery *ConfigDelivery, initialize func(Config, io.Writer) error) error {
 	c.realtimeLogin = true
 	if c.Interval() <= 0 {
 		return fmt.Errorf("check interval must be positive")
@@ -68,6 +72,11 @@ func serveRuntime(ctx context.Context, c Config, writer io.Writer, version strin
 	// already supports that, while embedded callers may supply a bytes.Buffer.
 	if writer != nil {
 		writer = &lockedWriter{writer: writer}
+	}
+	if !c.waitingForConfig {
+		if err := initialize(c, writer); err != nil {
+			return err
+		}
 	}
 	if c.waitingForConfig {
 		logWaitingForConfig(writer)
@@ -194,6 +203,16 @@ func serveRuntime(ctx context.Context, c Config, writer io.Writer, version strin
 			// Old workers must release history cursor locks before the next set
 			// starts. Cache failure restarts the original workers unchanged.
 			stopWorkers()
+			if !next.waitingForConfig {
+				if err := initialize(next, writer); err != nil {
+					if nextUnlock != nil {
+						nextUnlock()
+					}
+					stopWorkers = startWorkers(c)
+					update.result <- err
+					continue
+				}
+			}
 			if next.Security != nil || c.Security != nil {
 				if err := applySecurityComponents(ctx, next, writer); err != nil {
 					if nextUnlock != nil {
