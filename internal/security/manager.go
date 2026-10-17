@@ -120,7 +120,7 @@ func (m *Manager) status(ctx context.Context, name string, enabled bool) Compone
 		}
 		return s
 	}
-	_, err := m.Runner.LookPath(binary)
+	binaryPath, err := m.Runner.LookPath(binary)
 	s.Installed = err == nil
 	if !s.Installed {
 		s.State = "missing"
@@ -130,16 +130,24 @@ func (m *Manager) status(ctx context.Context, name string, enabled bool) Compone
 	if version, ok := m.versions[name]; ok {
 		s.Version = version
 	} else {
-		args := []string{"--version"}
-		if name == "auditd" {
-			args = []string{"-v"}
+		if name == "tetragon" {
+			version = m.tetragonVersion(ctx, binaryPath)
+		} else {
+			args := []string{"--version"}
+			if name == "auditd" {
+				args = []string{"-v"}
+			}
+			if out, err := m.Runner.Run(ctx, binary, args...); err == nil {
+				version = strings.TrimSpace(strings.SplitN(strings.TrimSpace(out), "\n", 2)[0])
+				if len(version) > 200 {
+					version = version[:200]
+				}
+			}
 		}
-		out, _ := m.Runner.Run(ctx, binary, args...)
-		version = strings.TrimSpace(strings.SplitN(out, "\n", 2)[0])
-		if len(version) > 200 {
-			version = version[:200]
+		// Failed and empty probes must be retried on the next status report.
+		if version != "" {
+			m.versions[name] = version
 		}
-		m.versions[name] = version
 		s.Version = version
 	}
 	if name == "sudo" {
