@@ -194,7 +194,7 @@ func (m *Manager) Status(ctx context.Context) []ComponentStatus {
 		statuses[i].ConfigHash = configHash(m.Config)
 		statuses[i].AppliedAt = m.appliedAt
 	}
-	for p, want := range persisted.Files {
+	for p, want := range persisted.configuredFiles() {
 		b, err := os.ReadFile(m.path(p))
 		if err == nil && hashString(string(b)) == want {
 			continue
