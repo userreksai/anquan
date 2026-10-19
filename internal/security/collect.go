@@ -179,17 +179,31 @@ func (m *Manager) collectLog(ctx context.Context, s *collectorState, path, sourc
 		}
 		found := false
 		for _, e := range entries {
-			if e.IsDir() || !strings.HasPrefix(e.Name(), filepath.Base(full)) {
+			if e.IsDir() || !isLogRotationCandidate(filepath.Base(full), e.Name()) {
 				continue
 			}
 			candidate := filepath.Join(filepath.Dir(full), e.Name())
 			ci, er := os.Stat(candidate)
-			if er != nil || fileIdentity(ci) != cursor.Identity {
+			if er != nil || !ci.Mode().IsRegular() || fileIdentity(ci) != cursor.Identity {
 				continue
 			}
 			old, er := os.Open(candidate)
+			if os.IsNotExist(er) {
+				continue
+			}
 			if er != nil {
 				return er
+			}
+			// Rotation can replace a directory entry between Stat and Open.
+			// Only resume the saved offset on the actual saved file identity.
+			opened, er := old.Stat()
+			if er != nil {
+				old.Close()
+				return er
+			}
+			if !opened.Mode().IsRegular() || fileIdentity(opened) != cursor.Identity {
+				old.Close()
+				continue
 			}
 			done, er := m.readLogBatch(ctx, old, path, &cursor, lineFn, oversizeFn)
 			old.Close()
@@ -242,6 +256,25 @@ func (m *Manager) collectLog(ctx context.Context, s *collectorState, path, sourc
 	s.Cursors[path] = cursor
 	return nil
 }
+
+func isLogRotationCandidate(base, name string) bool {
+	// Keep numeric/suffix rotations such as audit.log.1 and sudo.log.1.
+	if strings.HasPrefix(name, base) {
+		return true
+	}
+	// Tetragon's lumberjack exporter inserts the rotation timestamp before
+	// the extension: tetragon-2026-10-18T22-27-08.755.log.
+	ext := filepath.Ext(base)
+	prefix := strings.TrimSuffix(base, ext) + "-"
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ext) {
+		return false
+	}
+	stamp := name[len(prefix) : len(name)-len(ext)]
+	const layout = "2006-01-02T15-04-05.000"
+	rotatedAt, err := time.Parse(layout, stamp)
+	return err == nil && rotatedAt.Format(layout) == stamp
+}
+
 func sourceAnchor(f *os.File, offset int64) (string, error) {
 	n := int64(128)
 	if offset < n {
