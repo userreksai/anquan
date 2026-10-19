@@ -33,6 +33,8 @@ func patchHistoryScript(original []byte) ([]byte, bool) {
 
 type historyScriptRepair struct {
 	Repaired       bool
+	AppendRepaired bool
+	PromptDeferred bool
 	BackupPath     string
 	OriginalSHA256 string
 	UpdatedSHA256  string
@@ -57,10 +59,15 @@ func repairHistoryScript(path string, beforeReplace func(historyScriptRepair) er
 	if err != nil {
 		return result, err
 	}
-	updated, changed := patchHistoryScript(original)
-	if !changed {
+	updated, appendChanged := patchHistoryScript(original)
+	updated, promptChanged := patchHistoryPromptScript(updated)
+	if !appendChanged && !promptChanged {
 		return result, nil
 	}
+	if len(updated) > maxHistoryScriptBytes {
+		return result, fmt.Errorf("updated history audit script exceeds size limit")
+	}
+	result.AppendRepaired, result.PromptDeferred = appendChanged, promptChanged
 	originalHash, updatedHash := sha256.Sum256(original), sha256.Sum256(updated)
 	result.OriginalSHA256 = hex.EncodeToString(originalHash[:])
 	result.UpdatedSHA256 = hex.EncodeToString(updatedHash[:])

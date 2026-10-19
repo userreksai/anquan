@@ -48,18 +48,44 @@ func initializeHistoryScriptAt(c Config, writer io.Writer, scriptPath string) er
 	}
 	defer unlock()
 	repair, err := repairHistoryScript(scriptPath, func(repair historyScriptRepair) error {
+		// Deferring startup logging changes no source bytes. It must never
+		// authorize replay/reset of an otherwise valid command cursor.
+		if !repair.AppendRepaired {
+			return migrateHistoryScriptRecoveryHash(c, scriptPath, repair)
+		}
 		return recordHistoryScriptRecovery(c, scriptPath, repair.UpdatedSHA256)
 	})
 	if err != nil {
 		return fmt.Errorf("history script initialization failed: %w", err)
 	}
 	if repair.Repaired {
-		return writeLog(c, writer, time.Now(), "history_script_repaired", map[string]string{
+		return writeLog(c, writer, time.Now(), "history_script_repaired", map[string]any{
 			"path": scriptPath, "backup": repair.BackupPath,
-			"message": "fixed truncating history log redirection; existing interactive shells must reconnect to load the updated function",
+			"append_repaired": repair.AppendRepaired, "prompt_deferred": repair.PromptDeferred,
+			"message": "updated the known history audit writer; existing interactive shells must reconnect to load the updated hook",
 		})
 	}
 	return nil
+}
+
+// An older Agent may have repaired the writer but not yet consumed its
+// recovery receipt. A prompt-only upgrade may update that existing receipt's
+// script hash; it cannot create a receipt or alter its source/generation/log.
+func migrateHistoryScriptRecoveryHash(c Config, scriptPath string, repair historyScriptRepair) error {
+	var s historyState
+	if err := readState(c.StateFile+".commands", "history", &s); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("preserve command state during prompt upgrade: %w", err)
+	}
+	r := s.ScriptRepair
+	source := loginDigest(c.History.Path + "\x00" + c.History.Timezone)
+	if r == nil || !validHistoryState(s, source) || r.Version != 1 || r.Source != s.Source ||
+		r.Generation != s.Generation || r.ScriptPath != scriptPath || r.UpdatedSHA256 != repair.OriginalSHA256 {
+		return nil
+	}
+	r.UpdatedSHA256 = repair.UpdatedSHA256
+	return writeState(c.StateFile+".commands", "history", s)
 }
 
 func recordHistoryScriptRecovery(c Config, scriptPath, updatedSHA256 string) error {
