@@ -38,7 +38,7 @@ func prepareHistoryRecoveryScript(t *testing.T, c Config) string {
 	if err := initializeHistoryScriptAt(c, nil, path); err != nil {
 		t.Fatal(err)
 	}
-	if read(t, path) != fixedHistoryScript() {
+	if read(t, path) != initializedHistoryScript() {
 		t.Fatal("initialization did not repair the known truncating writer")
 	}
 	return path
@@ -196,7 +196,7 @@ func TestHistoryScriptRecoveryRequiresCompletedScriptReplacement(t *testing.T) {
 	put(t, c.History.Path, historyLine("new command"))
 	script := filepath.Join(t.TempDir(), "history-audit.sh")
 	put(t, script, brokenHistoryScript)
-	fixedHash := sha256.Sum256([]byte(fixedHistoryScript()))
+	fixedHash := sha256.Sum256([]byte(initializedHistoryScript()))
 	// Simulate a crash/failure after durable preparation but before rename.
 	if err := recordHistoryScriptRecovery(c, script, hex.EncodeToString(fixedHash[:])); err != nil {
 		t.Fatal(err)

@@ -38,6 +38,11 @@ func fixedHistoryScript() string {
 	return strings.ReplaceAll(brokenHistoryScript, "} 200>/var/log/history.log", "} 200>>/var/log/history.log")
 }
 
+func initializedHistoryScript() string {
+	updated, _ := patchHistoryPromptScript([]byte(fixedHistoryScript()))
+	return string(updated)
+}
+
 func TestPatchHistoryScriptOnlyKnownTruncation(t *testing.T) {
 	for _, tc := range []struct {
 		name, original, want string
@@ -89,13 +94,13 @@ func TestRepairHistoryScriptBackupAndIdempotence(t *testing.T) {
 	if err != nil || !result.Repaired || called != 1 {
 		t.Fatalf("result=%+v callback=%d err=%v", result, called, err)
 	}
-	if got := read(t, path); got != fixedHistoryScript() {
-		t.Fatal("known redirect was not repaired without other changes")
+	if got := read(t, path); got != initializedHistoryScript() || !result.AppendRepaired || !result.PromptDeferred {
+		t.Fatal("known writer was not repaired and deferred until the first prompt")
 	}
 	if got := read(t, result.BackupPath); got != brokenHistoryScript {
 		t.Fatal("original backup changed")
 	}
-	updatedHash := sha256.Sum256([]byte(fixedHistoryScript()))
+	updatedHash := sha256.Sum256([]byte(initializedHistoryScript()))
 	if result.UpdatedSHA256 != hex.EncodeToString(updatedHash[:]) {
 		t.Fatal("replacement digest does not identify installed bytes")
 	}

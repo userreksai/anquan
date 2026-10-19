@@ -432,7 +432,7 @@ login:
 
 `history` 读取已有命令日志，不会自动安装命令记录脚本，也不会自动读取全部 Shell、系统调用或其他用户的所有操作。目标机应已有记录机制持续往日志追加约定格式的数据，例如已有的 `/etc/profile.d/history-audit.sh`。
 
-在 Linux 上启用 `history` 且使用默认源 `/var/log/history.log` 时，新版 Agent 会在服务启动、配置热更新及单次命令采集时幂等修复这个既有脚本中的已知截断错误：先备份到 `/etc/profile.d/.history-audit.sh.anquan-before-append-*`，再将锁描述符的 `200>/var/log/history.log` 改为 `200>>/var/log/history.log`；修复失败会阻止初始化或拒绝新配置。只修正识别出的既有实现，不安装缺失脚本、不覆盖其他自定义脚本，不修改过滤规则或 `PROMPT_COMMAND`。修复版在新登录的会话中加载，旧会话应退出后重新登录；已经被覆盖且未上报的命令无法恢复。
+在 Linux 上启用 `history` 且使用默认源 `/var/log/history.log` 时，新版 Agent 会在服务启动、配置热更新及单次命令采集时幂等升级这个既有脚本：先备份到 `/etc/profile.d/.history-audit.sh.anquan-before-append-*`，再修复已知的 `200>` 截断错误，并将已知交互 Bash 钩子延后至首次提示符启用，避免采集登录初始化循环。原有 `PROMPT_COMMAND` 保留，提示符钩子执行期间暂停审计，已有其他 DEBUG trap 不覆盖；不支持的只读等提示符属性会保留并提示新钩子未安装。非交互 Bash 保持原行为，手动 `source`、循环及重复命令仍保留。不安装缺失脚本、不覆盖其他自定义实现，失败会阻止初始化或拒绝新配置。新钩子需退出重登生效；单独提示符升级不会创建恢复凭证或重置命令游标。已经被覆盖且未上报的命令无法恢复。
 
 必须有可读的日志文件、非空 `server`、支持命令入库确认的配套 Master。持续采集应使用常驻 `-service`。不需要此功能时省略 `history`，或明确设置 `enabled: false`。
 
