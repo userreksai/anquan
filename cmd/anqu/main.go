@@ -16,9 +16,10 @@ import (
 	"anqu/internal/defaults"
 	"anqu/internal/install"
 	"anqu/internal/sealed"
+	"anqu/internal/selfupdate"
 )
 
-const version = "0.7.2"
+const version = "0.7.3"
 
 func main() {
 	os.Exit(runPrepared(os.Args[1:], os.Stdout, os.Stderr, sealed.Config, os.Executable, install.Prepare))
@@ -31,6 +32,17 @@ func runPrepared(args []string, stdout, stderr io.Writer, load func() ([]byte, e
 }
 
 func runPreparedWithSSH(args []string, stdout, stderr io.Writer, load func() ([]byte, error), executable func() (string, error), prepare func(string, []string, io.Writer) (install.Preparation, error), requestSSH func(context.Context, string, audit.SSHExecutionRequest) error, currentCaller func() (audit.SSHExecutionCaller, error), isInstalled func(string) bool) int {
+	if len(args) > 0 && args[0] == "-update-helper" {
+		if len(args) != 2 {
+			fmt.Fprintln(stderr, "invalid internal update helper invocation")
+			return 1
+		}
+		if err := selfupdate.RunHelper(args[1]); err != nil {
+			fmt.Fprintln(stderr, "Agent update failed:", err)
+			return 1
+		}
+		return 0
+	}
 	flags := flag.NewFlagSet("anqu", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	showVersion := flags.Bool("version", false, "print program version")
@@ -119,6 +131,7 @@ func runPreparedWithSSH(args []string, stdout, stderr io.Writer, load func() ([]
 		fmt.Fprintln(stderr, "master configuration cache unavailable; retaining local configuration or waiting for assignment")
 	}
 	if *service {
+		delivery.SetSelfUpdater(selfupdate.NewInstalled(path, version))
 		if err := audit.ServeWithConfigDelivery(ctx, cfg, stdout, version, delivery); err != nil {
 			fmt.Fprintln(stderr, "service failed:", err)
 			return 1

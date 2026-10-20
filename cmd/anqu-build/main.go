@@ -60,6 +60,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stdout, "agent=%s target=%s/%s\n", opts.output, opts.goos, opts.goarch)
+	fmt.Fprintf(stdout, "update manifest=%s.update.json (keep beside the executable for Master packaging)\n", opts.output)
 	fmt.Fprintln(stdout, "Run the Linux agent as root without arguments to install and start agent.service using "+defaults.MasterAddress+". Optional config.age remains a local fallback; no key setup required.")
 	fmt.Fprintln(stdout, "Embedded encryption increases extraction cost; administrators and reverse engineers can still recover it.")
 	return nil
@@ -116,6 +117,10 @@ func build(opts options, stdout, stderr io.Writer) error {
 	}
 	defer clear(data)
 	root, err := projectRoot()
+	if err != nil {
+		return err
+	}
+	targetVersion, err := sourceVersion(root)
 	if err != nil {
 		return err
 	}
@@ -185,6 +190,10 @@ func build(opts options, stdout, stderr io.Writer) error {
 	if err := os.Chmod(stagePath, 0700); err != nil {
 		return err
 	}
+	manifest, err := executableManifest(stagePath, targetVersion, opts.goos, opts.goarch)
+	if err != nil {
+		return fmt.Errorf("prepare update manifest: %w", err)
+	}
 	if len(data) > 0 {
 		ciphertext, err := sealed.EncryptConfig(data)
 		if err != nil {
@@ -198,6 +207,11 @@ func build(opts options, stdout, stderr io.Writer) error {
 	// opens or truncates a previously deployed executable.
 	if err := os.Rename(stagePath, output); err != nil {
 		return fmt.Errorf("replace agent executable: %w", err)
+	}
+	// The Master verifies the manifest against the executable before publishing.
+	// A concurrent read between the two renames fails closed on a digest mismatch.
+	if err := writeAtomic(output+".update.json", manifest); err != nil {
+		return fmt.Errorf("write update manifest: %w", err)
 	}
 	return nil
 }

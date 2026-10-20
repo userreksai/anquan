@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -19,27 +20,36 @@ import (
 
 	"anqu/internal/downloadrelay"
 	"anqu/internal/sealed"
+	"anqu/internal/selfupdate"
 )
 
 const ConfigDeliveryPort = "55556"
 const maxConfigFrameBytes = 8 << 20
 
 type configFrame struct {
-	Version       int    `json:"version"`
-	Type          string `json:"type"`
-	IP            string `json:"ip,omitempty"`
-	ReportedIP    string `json:"reported_ip,omitempty"`
-	Host          string `json:"host,omitempty"`
-	AgentVersion  string `json:"agent_version,omitempty"`
-	DiscoverIP    bool   `json:"discover_ip,omitempty"`
-	Revision      string `json:"revision,omitempty"`
-	Ciphertext    string `json:"ciphertext,omitempty"`
-	Error         string `json:"error,omitempty"`
-	DownloadRelay bool   `json:"download_relay,omitempty"`
-	DownloadToken string `json:"download_token,omitempty"`
-	Token         string `json:"token,omitempty"`
-	Target        string `json:"target,omitempty"`
-	ExpiresAt     string `json:"expires_at,omitempty"`
+	Version            int                    `json:"version"`
+	Type               string                 `json:"type"`
+	IP                 string                 `json:"ip,omitempty"`
+	ReportedIP         string                 `json:"reported_ip,omitempty"`
+	Host               string                 `json:"host,omitempty"`
+	AgentVersion       string                 `json:"agent_version,omitempty"`
+	DiscoverIP         bool                   `json:"discover_ip,omitempty"`
+	Revision           string                 `json:"revision,omitempty"`
+	Ciphertext         string                 `json:"ciphertext,omitempty"`
+	Error              string                 `json:"error,omitempty"`
+	DownloadRelay      bool                   `json:"download_relay,omitempty"`
+	DownloadToken      string                 `json:"download_token,omitempty"`
+	Token              string                 `json:"token,omitempty"`
+	Target             string                 `json:"target,omitempty"`
+	ExpiresAt          string                 `json:"expires_at,omitempty"`
+	SelfUpdate         bool                   `json:"self_update,omitempty"`
+	GOOS               string                 `json:"goos,omitempty"`
+	GOARCH             string                 `json:"goarch,omitempty"`
+	UpdatePublicKey    string                 `json:"update_public_key,omitempty"`
+	Update             *selfupdate.Descriptor `json:"update,omitempty"`
+	UpdateJobID        string                 `json:"update_job_id,omitempty"`
+	UpdateBinarySHA256 string                 `json:"update_binary_sha256,omitempty"`
+	UpdateResult       *selfupdate.Result     `json:"update_result,omitempty"`
 }
 
 type controlEndpoint struct{ tcp string }
@@ -56,16 +66,21 @@ type configUpdate struct {
 // destinations, and identifies the local interface used to reach the master.
 // The first reachable master owns the connection until it disconnects.
 type ConfigDelivery struct {
-	bootstrap Config
-	current   Config
-	baseDir   string
-	version   string
-	revision  string
-	endpoints []controlEndpoint
-	dial      func(context.Context, string, string) (net.Conn, error)
-	retry     time.Duration
-	ping      time.Duration
+	bootstrap   Config
+	current     Config
+	baseDir     string
+	version     string
+	revision    string
+	endpoints   []controlEndpoint
+	dial        func(context.Context, string, string) (net.Conn, error)
+	retry       time.Duration
+	ping        time.Duration
+	selfUpdater *selfupdate.Manager
 }
+
+// SetSelfUpdater is called only by the installed continuous service. One-shot
+// synchronization never advertises or accepts executable updates.
+func (d *ConfigDelivery) SetSelfUpdater(updater *selfupdate.Manager) { d.selfUpdater = updater }
 
 func NewConfigDelivery(bootstrap Config, baseDir, version string) *ConfigDelivery {
 	if bootstrap.identity == nil {
@@ -280,6 +295,20 @@ func (d *ConfigDelivery) connection(ctx context.Context, conn net.Conn, endpoint
 	}
 	selectedIP := localSocketIP(conn.LocalAddr())
 	hello := configFrame{Version: 1, Type: "hello", DiscoverIP: true, Host: host, AgentVersion: d.version, DownloadRelay: true}
+	updater := d.selfUpdater
+	if !once && updater != nil {
+		hello.SelfUpdate = true
+		hello.GOOS, hello.GOARCH = runtime.GOOS, runtime.GOARCH
+		result, digest := updater.IdentityResult(false)
+		if result != nil {
+			hello.UpdateJobID, hello.UpdateBinarySHA256 = result.JobID, digest
+			if result.Status != "restarting" {
+				hello.UpdateResult = result
+			}
+		}
+	} else {
+		updater = nil
+	}
 	if selectedIP != "" {
 		if err := d.selectLocalIP(selectedIP); err != nil {
 			return err
@@ -311,6 +340,9 @@ func (d *ConfigDelivery) connection(ctx context.Context, conn net.Conn, endpoint
 	defer func() { cancel(); _ = conn.Close(); <-pingDone }()
 	scanner := bufio.NewScanner(conn)
 	scanner.Buffer(make([]byte, 64*1024), maxConfigFrameBytes)
+	var updateKey []byte
+	var updateKeyError error
+	var observedIP string
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -339,6 +371,37 @@ func (d *ConfigDelivery) connection(ctx context.Context, conn net.Conn, endpoint
 			}
 			if d.bootstrap.downloadRelay != nil {
 				d.bootstrap.downloadRelay.Update(endpoint.tcp, frame.IP, frame.DownloadToken)
+			}
+			observedIP = frame.IP
+			if updater != nil && frame.UpdatePublicKey != "" {
+				updateKey, updateKeyError = updater.Pin(endpoint.tcp, frame.UpdatePublicKey)
+				if result, digest := updater.IdentityResult(updateKeyError == nil); updateKeyError == nil && result != nil && result.Status != "restarting" {
+					if err := write(configFrame{Version: 1, Type: "update_result", AgentVersion: d.version, GOOS: runtime.GOOS, GOARCH: runtime.GOARCH, UpdateJobID: result.JobID, UpdateBinarySHA256: digest, UpdateResult: result}); err != nil {
+						return err
+					}
+				}
+			}
+		case "update_offer":
+			if updater == nil || frame.Update == nil || observedIP == "" {
+				return errors.New("unavailable or unauthenticated Agent update offer")
+			}
+			report := func(result selfupdate.Result) error {
+				return write(configFrame{Version: 1, Type: "update_status", UpdateJobID: result.JobID, UpdateResult: &result})
+			}
+			if len(updateKey) == 0 {
+				message := "Master update signing key is unavailable"
+				if updateKeyError != nil {
+					message = updateKeyError.Error()
+				}
+				if err := report(selfupdate.Result{JobID: frame.Update.JobID, Status: "failed", Error: message}); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := updater.Start(ctx, endpoint.tcp, observedIP, updateKey, *frame.Update, report); err != nil {
+				if err := report(selfupdate.Result{JobID: frame.Update.JobID, Status: "failed", Error: boundedConfigACKError(err.Error())}); err != nil {
+					return err
+				}
 			}
 		case "pong":
 			continue
