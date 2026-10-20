@@ -12,9 +12,12 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	"anqu/internal/downloadrelay"
 	"anqu/internal/sealed"
 )
 
@@ -22,16 +25,21 @@ const ConfigDeliveryPort = "55556"
 const maxConfigFrameBytes = 8 << 20
 
 type configFrame struct {
-	Version      int    `json:"version"`
-	Type         string `json:"type"`
-	IP           string `json:"ip,omitempty"`
-	ReportedIP   string `json:"reported_ip,omitempty"`
-	Host         string `json:"host,omitempty"`
-	AgentVersion string `json:"agent_version,omitempty"`
-	DiscoverIP   bool   `json:"discover_ip,omitempty"`
-	Revision     string `json:"revision,omitempty"`
-	Ciphertext   string `json:"ciphertext,omitempty"`
-	Error        string `json:"error,omitempty"`
+	Version       int    `json:"version"`
+	Type          string `json:"type"`
+	IP            string `json:"ip,omitempty"`
+	ReportedIP    string `json:"reported_ip,omitempty"`
+	Host          string `json:"host,omitempty"`
+	AgentVersion  string `json:"agent_version,omitempty"`
+	DiscoverIP    bool   `json:"discover_ip,omitempty"`
+	Revision      string `json:"revision,omitempty"`
+	Ciphertext    string `json:"ciphertext,omitempty"`
+	Error         string `json:"error,omitempty"`
+	DownloadRelay bool   `json:"download_relay,omitempty"`
+	DownloadToken string `json:"download_token,omitempty"`
+	Token         string `json:"token,omitempty"`
+	Target        string `json:"target,omitempty"`
+	ExpiresAt     string `json:"expires_at,omitempty"`
 }
 
 type controlEndpoint struct{ tcp string }
@@ -62,6 +70,9 @@ type ConfigDelivery struct {
 func NewConfigDelivery(bootstrap Config, baseDir, version string) *ConfigDelivery {
 	if bootstrap.identity == nil {
 		bootstrap.identity = &agentIdentity{}
+	}
+	if len(bootstrap.masters) > 0 && bootstrap.downloadRelay == nil {
+		bootstrap.downloadRelay = downloadrelay.New()
 	}
 	d := &ConfigDelivery{bootstrap: bootstrap, current: bootstrap, baseDir: baseDir, version: version, retry: 5 * time.Second, ping: 30 * time.Second}
 	dialer := net.Dialer{Timeout: 2 * time.Second, KeepAlive: 30 * time.Second}
@@ -124,7 +135,7 @@ func (d *ConfigDelivery) parseAssigned(ciphertext []byte) (Config, error) {
 	}
 	// The UDP server list belongs to the assigned config. TCP configuration
 	// destinations and observed identity belong to deployment/runtime state.
-	cfg.masters, cfg.identity = d.bootstrap.masters, d.bootstrap.identity
+	cfg.masters, cfg.identity, cfg.downloadRelay = d.bootstrap.masters, d.bootstrap.identity, d.bootstrap.downloadRelay
 	cfg, err = normalizeConfig(cfg, d.baseDir, nativePathRules())
 	if err != nil {
 		return Config{}, errors.New("master configuration validation failed")
@@ -243,6 +254,9 @@ func (d *ConfigDelivery) selectLocalIP(address string) error {
 }
 
 func (d *ConfigDelivery) connection(ctx context.Context, conn net.Conn, endpoint controlEndpoint, once bool, apply func(Config, func() error) error) error {
+	if d.bootstrap.downloadRelay != nil {
+		defer d.bootstrap.downloadRelay.Clear()
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	var writeMu sync.Mutex
 	write := func(frame configFrame) error {
@@ -265,7 +279,7 @@ func (d *ConfigDelivery) connection(ctx context.Context, conn net.Conn, endpoint
 		return errors.New("cannot determine agent hostname")
 	}
 	selectedIP := localSocketIP(conn.LocalAddr())
-	hello := configFrame{Version: 1, Type: "hello", DiscoverIP: true, Host: host, AgentVersion: d.version}
+	hello := configFrame{Version: 1, Type: "hello", DiscoverIP: true, Host: host, AgentVersion: d.version, DownloadRelay: true}
 	if selectedIP != "" {
 		if err := d.selectLocalIP(selectedIP); err != nil {
 			return err
@@ -320,10 +334,11 @@ func (d *ConfigDelivery) connection(ctx context.Context, conn net.Conn, endpoint
 				if ip := net.ParseIP(frame.IP); ip == nil || ip.String() != selectedIP {
 					return errors.New("master returned an identity different from the selected local IP")
 				}
-				continue
-			}
-			if err := d.observeIP(frame.IP); err != nil {
+			} else if err := d.observeIP(frame.IP); err != nil {
 				return err
+			}
+			if d.bootstrap.downloadRelay != nil {
+				d.bootstrap.downloadRelay.Update(endpoint.tcp, frame.IP, frame.DownloadToken)
 			}
 		case "pong":
 			continue
@@ -331,7 +346,7 @@ func (d *ConfigDelivery) connection(ctx context.Context, conn net.Conn, endpoint
 			applyErr := d.accept(frame, apply)
 			ack := configFrame{Version: 1, Type: "ack", Revision: frame.Revision}
 			if applyErr != nil {
-				ack.Error = applyErr.Error()
+				ack.Error = boundedConfigACKError(applyErr.Error())
 			}
 			if err := write(ack); err != nil {
 				return err
@@ -343,6 +358,22 @@ func (d *ConfigDelivery) connection(ctx context.Context, conn net.Conn, endpoint
 			return errors.New("unexpected master configuration frame")
 		}
 	}
+}
+
+// Keep the final apt/dnf error visible without exceeding the master's ACK limit.
+// Full command output remains in the local security_apply_failed log.
+func boundedConfigACKError(value string) string {
+	value = strings.ToValidUTF8(value, "�")
+	const limit = 4096
+	if len(value) <= limit {
+		return value
+	}
+	const prefix = "[truncated; see Agent security_apply_failed log] ... "
+	value = value[len(value)-(limit-len(prefix)):]
+	for !utf8.ValidString(value) {
+		value = value[1:]
+	}
+	return prefix + value
 }
 
 func (d *ConfigDelivery) accept(frame configFrame, apply func(Config, func() error) error) error {

@@ -18,7 +18,7 @@ import (
 	"anqu/internal/sealed"
 )
 
-const version = "0.7.0"
+const version = "0.7.1"
 
 func main() {
 	os.Exit(runPrepared(os.Args[1:], os.Stdout, os.Stderr, sealed.Config, os.Executable, install.Prepare))

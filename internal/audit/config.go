@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"anqu/internal/downloadrelay"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -39,6 +40,7 @@ type Config struct {
 	runtimeDir        string
 	masters           []string
 	identity          *agentIdentity
+	downloadRelay     *downloadrelay.State
 }
 
 // WaitingForConfig is true only for an agent with no local or assigned audit

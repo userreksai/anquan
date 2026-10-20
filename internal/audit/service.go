@@ -26,6 +26,7 @@ func ServeWithConfigDelivery(ctx context.Context, c Config, writer io.Writer, ve
 	if delivery == nil || len(delivery.endpoints) == 0 {
 		return Serve(ctx, c, writer, version)
 	}
+	c.downloadRelay = delivery.bootstrap.downloadRelay
 	unlock, err := lockService(delivery.cachePath())
 	if err != nil {
 		return err

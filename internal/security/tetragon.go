@@ -30,11 +30,24 @@ type releaseInfo struct {
 }
 
 func secureDownload(ctx context.Context, address string, limit int64) ([]byte, error) {
+	return secureDownloadVia(ctx, address, limit, "")
+}
+
+func secureDownloadVia(ctx context.Context, address string, limit int64, proxy string) ([]byte, error) {
 	u, err := url.Parse(address)
 	if err != nil || u.Scheme != "https" || u.Host == "" {
 		return nil, errors.New("download must use HTTPS")
 	}
-	client := &http.Client{Timeout: 3 * time.Minute, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	if proxy != "" {
+		proxyURL, err := url.Parse(proxy)
+		if err != nil {
+			return nil, err
+		}
+		transport.Proxy = http.ProxyURL(proxyURL)
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 3 * time.Minute, CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if req.URL.Scheme != "https" {
 			return errors.New("refusing HTTPS downgrade")
 		}
@@ -76,6 +89,19 @@ func (m *Manager) installTetragon(ctx context.Context) error {
 	if _, err := os.Stat(m.path("/sys/kernel/btf/vmlinux")); err != nil {
 		return errors.New("Tetragon requires readable kernel BTF at /sys/kernel/btf/vmlinux; configure a supported host before enabling it")
 	}
+	proxy, err := m.packageProxy(ctx)
+	if err != nil {
+		return err
+	}
+	ctx = relayCommandContext(ctx, proxy)
+	if proxy != "" {
+		if err = m.ensurePackage(ctx, "unshare", "util-linux", "util-linux"); err != nil {
+			return fmt.Errorf("prepare offline Tetragon installer: %w", err)
+		}
+	}
+	download := func(address string, limit int64) ([]byte, error) {
+		return secureDownloadVia(ctx, address, limit, proxy)
+	}
 	assetName := "tetragon-" + t.Version + "-" + runtime.GOARCH + ".tar.gz"
 	address := t.DownloadURL
 	if address == "" {
@@ -83,7 +109,7 @@ func (m *Manager) installTetragon(ctx context.Context) error {
 	}
 	expected := strings.ToLower(t.SHA256)
 	if expected == "" {
-		b, err := secureDownload(ctx, "https://api.github.com/repos/cilium/tetragon/releases/tags/"+t.Version, 2*1024*1024)
+		b, err := download("https://api.github.com/repos/cilium/tetragon/releases/tags/"+t.Version, 2*1024*1024)
 		if err != nil {
 			return fmt.Errorf("retrieve official release checksum: %w", err)
 		}
@@ -102,7 +128,7 @@ func (m *Manager) installTetragon(ctx context.Context) error {
 		if expected == "" {
 			for _, a := range release.Assets {
 				if a.Name == assetName+".sha256sum" || a.Name == assetName+".sha256" || a.Name == "checksums.txt" || a.Name == "sha256sums.txt" {
-					sum, err := secureDownload(ctx, a.URL, 1024*1024)
+					sum, err := download(a.URL, 1024*1024)
 					if err != nil {
 						return err
 					}
@@ -126,7 +152,7 @@ func (m *Manager) installTetragon(ctx context.Context) error {
 			return errors.New("official release has no usable SHA256 digest; provide tetragon.sha256 explicitly")
 		}
 	}
-	archive, err := secureDownload(ctx, address, 256*1024*1024)
+	archive, err := download(address, 256*1024*1024)
 	if err != nil {
 		return err
 	}
@@ -161,10 +187,21 @@ func (m *Manager) installTetragon(ctx context.Context) error {
 	if installer == "" {
 		return errors.New("official Tetragon package is missing install.sh")
 	}
-	// The upstream installer expects its package directory as working directory.
-	// Execute the installer itself so its upstream shebang selects the correct
-	// interpreter. A fixed wrapper supplies no user-controlled shell source.
-	if _, err = m.Runner.Run(ctx, "sh", "-c", "cd -- \"$1\" && exec ./install.sh", "anquan-tetragon-installer", filepath.Dir(installer)); err != nil {
+	// An upstream shell installer is outside the Go HTTP client's network
+	// boundary. Run it in a network namespace with no interfaces when relaying;
+	// fail closed if the host cannot provide that isolation.
+	if proxy != "" {
+		_, err = m.Runner.Run(ctx, "unshare", "--net", "--", "sh", "-c", "cd -- \"$1\" && exec ./install.sh", "anquan-tetragon-installer", filepath.Dir(installer))
+		if err != nil {
+			return fmt.Errorf("Tetragon offline installer requires permission to create a network namespace (CAP_SYS_ADMIN): %w", err)
+		}
+	} else {
+		// The upstream installer expects its package directory as working directory.
+		// Execute the installer itself so its upstream shebang selects the correct
+		// interpreter. A fixed wrapper supplies no user-controlled shell source.
+		_, err = m.Runner.Run(ctx, "sh", "-c", "cd -- \"$1\" && exec ./install.sh", "anquan-tetragon-installer", filepath.Dir(installer))
+	}
+	if err != nil {
 		return err
 	}
 	if _, err = m.Runner.LookPath("tetragon"); err != nil {

@@ -1,6 +1,6 @@
-# Agent / Master UDP 协议
+# Agent / Master 协议
 
-Agent 向主控 `55555/udp` 发送 UTF-8 JSON，每个数据报是一条完整事件，单条不超过 60000 字节。Agent 还主动连接主控 `55556/tcp` 接收配置。主控 HTTP API 与前端分别使用 `10110/tcp`、`10111/tcp`。当前扩展保留 `version: 1` 和原有字段。
+Agent 向主控 `55555/udp` 发送 UTF-8 JSON，每个数据报是一条完整事件，单条不超过 60000 字节。Agent 还主动连接主控 `55556/tcp` 接收配置，组件安装下载通过该端口的独立临时连接转发，不增加 55557。主控 HTTP API 与前端分别使用 `10110/tcp`、`10111/tcp`。当前扩展保留 `version: 1` 和原有字段。
 
 ## 机器身份与配置
 
@@ -63,7 +63,7 @@ Master 收到首条有效心跳或检测事件时，按机器 IP 自动创建记
 
 旧 Agent 仍可只发送 `scan_summary`：没有收到独立心跳的机器使用 `max(扫描周期 × 3, 120)` 秒作为离线阈值，默认扫描 300 秒对应 900 秒，避免正常巡检间隔被误判离线。收到新 Agent 的独立心跳后自动使用心跳阈值。
 
-数据库初始化或打开旧库时，Master 自动迁移 SQLite schema 到 `PRAGMA user_version=6`。v2 增加机器心跳字段；v3 扩展事件类型及命令来源 ID 去重索引；v4 保存持续离线状态；v5 增加共享 YAML 模板；v6 增加按机器分配的加密配置、版本和应用确认状态。迁移保留机器信息、事件 ID、处理状态/备注、管理员密码、登录会话、webhook 配置及通知队列的重试记录和 ID 高水位。数据库版本与协议 `version: 1` 相互独立。
+数据库初始化或打开旧库时，Master 自动迁移 SQLite schema 到 `PRAGMA user_version=10`。v2 增加机器心跳字段；v3 扩展事件类型及命令来源 ID 去重索引；v4 保存持续离线状态；v5 增加共享 YAML 模板；v6 增加按机器分配的加密配置、版本和应用确认状态；v7 保存安全组件数据；v8/v9 增加事件保留与降噪策略；v10 保存安装下载窗口时长及允许域名。迁移保留机器信息、事件 ID、处理状态/备注、管理员密码、登录会话、webhook 配置及通知队列的重试记录和 ID 高水位。数据库版本与协议 `version: 1` 相互独立；旧 Master 不支持迁移后的库，降级须恢复升级前的一致性备份。
 
 ## TCP 配置下发（55556）
 
@@ -76,16 +76,16 @@ Linux 新机器从上传目录无参数执行会完成安装并启动后台服�
 每帧是 UTF-8 JSON 加换行（NDJSON），最大 8 MiB，`version: 1`。JSON 字符串内的 age 密文换行使用 JSON 转义。第一帧：
 
 ```json
-{"version":1,"type":"hello","ip":"172.22.0.27","reported_ip":"172.22.0.27","host":"node-a","agent_version":"0.6.8"}
+{"version":1,"type":"hello","ip":"172.22.0.27","reported_ip":"172.22.0.27","host":"node-a","agent_version":"0.7.0","download_relay":true}
 ```
 
 本机模式省略 discover_ip（false），`ip` 与 `reported_ip` 必须是同一规范化本机 IP。旧 Master 已支持显式 hello.ip，因此不识别新增字段时仍按本机 IP 登记，并直接发送配置；新版 Master 识别 reported_ip 后先确认身份再发送最新分配：
 
 ```json
-{"version":1,"type":"identity","ip":"172.22.0.27"}
+{"version":1,"type":"identity","ip":"172.22.0.27","download_token":"<当前配置连接的随机令牌>"}
 ```
 
-Agent 在发送 hello 前先加密保存本机地址并更新共享身份。新版主控确认帧必须与 Agent 选定的本机地址一致；返回代理地址或其它不同值时断开连接，保留本机身份，避免污染 UDP。旧 Agent 的 discover_ip=true 流程保留：主控按实际连接来源回复 identity；新版 Agent 仅在无法取得可用本机地址时使用该回退。旧 Agent 经过普通中转时仍可能被识别为中转地址，必须升级 Agent 才能主动携带本机 IP。
+Agent 在发送 hello 前先加密保存本机地址并更新共享身份。新版主控确认帧必须与 Agent 选定的本机地址一致；返回代理地址或其它不同值时断开连接，保留本机身份，避免污染 UDP。旧 Agent 的 discover_ip=true 流程保留：主控按实际连接来源回复 identity；新版 Agent 仅在无法取得可用本机地址时使用该回退。旧 Agent 经过普通中转时仍可能被识别为中转地址，必须升级 Agent 才能主动携带本机 IP。`download_relay` 是可选能力声明；支持下载的主控在 identity 附 `download_token`，令牌仅保存在内存，控制连接断开后失效。旧主控不返回该令牌时，配置协议继续兼容，但有 Master 的新版 Agent 不执行公网直连安装回退。
 
 没有分配时，revision 和 ciphertext 同时为空：
 
@@ -99,13 +99,58 @@ Agent 先验证 revision、age 完整性和节点平台的 YAML 配置，再原�
 {"version":1,"type":"ack","revision":"<当前版本>"}
 ```
 
-失败返回同版本和非空 `error`，保留当前有效配置及缓存；Master 记录失败供页面显示。未知或旧版本 ACK 不改变新分配状态。主控保存每台机器最近分配的密文、版本、下发和确认状态，重启或连接恢复时自动重发。下发 HTTP 成功只表示保存成功，节点生效以 ACK 为准。
+失败返回同版本和非空 `error`，保留当前有效配置及缓存；Master 记录失败供页面显示。Agent 将回执错误按 UTF-8 边界截断到 4096 字节内，避免长包管理器输出导致整条失败回执被拒收，完整输出留在本机日志。未知或旧版本 ACK 不改变新分配状态。主控保存每台机器最近分配的密文、版本、下发和确认状态，重启或连接恢复时自动重发。下发 HTTP 成功只表示保存成功，节点生效以 ACK 为准。
 
 Agent 每 30 秒发送 `{"version":1,"type":"ping"}`，主控回复 `{"version":1,"type":"pong"}`。有效 hello 和 ping 更新机器活动时间；连接异常后 Agent 自动重连。页面 `connected` 单独表示配置 TCP 连接，机器 `online` 仍按最近活动时间及既有超时阈值计算。
 
 主控配置优先于可选本地 config.age，常驻或 `-scan` 启动先使用有效缓存，再限时同步；无缓存且无本地配置时常驻等待。v0.6.8 已安装路径无参仅请求执行上报，不同步 TCP 或执行完整巡检。下发 server 列表立即生效并替换 UDP 目标，TCP 配置地址及自动 IP 不由 YAML 控制。连接文件 version 3 保存 master、local_ip 和兼容回退 observed_ip；version 1/2 自动迁移，并忽略旧手工 agent_ip。重启仅恢复仍属于本机接口的 local_ip，observed_ip 仅留作兼容元数据，不恢复为机器身份。临时 UDP 路由身份不强制落盘，由 TCP 选取的本机 IP 持久化。服务账号需要程序目录的缓存写入权限。升级顺序为支持执行事件的 Master、Agent，再更新 Web 示例。升级后本机 IP 会成为新的机器记录；已有代理记录可能混合多个节点的历史，不自动迁移或删除，旧目标的配置需按真实机器重新确认下发。
 
 此通道沿用内网机器 IP 信任方式，没有单独的节点认证或 TLS；age 密文用于配置加密，不构成 Master 身份认证。仅允许可信 Agent 网络访问 55556/TCP。既有 UDP、HTTP 与 Webhook 的传输行为保持原有协议。
+
+## 安装下载转发（复用 TCP 55556）
+
+原 hello 配置连接保持 NDJSON、保活和 ACK 不变。安装下载另开到同一主控地址的 TCP 连接，首帧使用以下类型分流；不在配置连接内传输安装包，也不新增 HTTP 包目录。
+
+Agent 实际需要下载时，用 identity 的 `download_token` 请求会话：
+
+```json
+{"version":1,"type":"package_session","ip":"172.22.0.11","token":"<download_token>"}
+```
+
+主控验证当前配置连接、Agent IP、实际连接来源和令牌，并检查管理员已为该机器分配非空配置及管理下载窗口后返回短期会话令牌；仅 hello 自动登记机器不能取得下载权限：
+
+```json
+{"version":1,"type":"package_session","token":"<下载会话令牌>","expires_at":"2026-10-20T09:00:00Z"}
+```
+
+随后每个下载流使用独立连接，以下载会话令牌和目标域名端口开始：
+
+```json
+{"version":1,"type":"package_relay","ip":"172.22.0.11","token":"<下载会话令牌>","target":"archive.ubuntu.com:443"}
+```
+
+主控确认 `{"version":1,"type":"package_ready"}` 后，该连接切换为原始双向字节流，直至连接结束。Agent 安装期的临时 `127.0.0.1` HTTP 代理只接受 GET、HEAD、CONNECT：HTTP 请求及 HTTPS 隧道均通过此流到软件源，TLS 仍由 Agent 和目标源端到端校验；包管理器的签名校验及 Tetragon SHA256 校验保留。APT/DNF/YUM 的依赖解析继续在 Agent 节点执行。
+
+安装结束关闭临时代理，并用独立连接请求撤销会话：
+
+```json
+{"version":1,"type":"package_close","ip":"172.22.0.11","token":"<下载会话令牌>"}
+```
+
+成功回复 `{"version":1,"type":"package_closed"}`。上述操作失败回复 `{"version":1,"type":"error","error":"<简短原因>"}` 后关闭连接。总开关关闭、总窗口或会话过期、原配置连接断开、分配配置版本变化时，主控撤销授权并终止活动下载；下载会话不能跨控制连接重连或配置版本复用。单会话目前最长 10 分钟，且不超过总窗口到期时间；超时需在允许窗口内重新下发重试。
+
+当前限额为每 Agent 最多 8 个下载流、全局最多 32 个下载流及 128 个会话；每流每方向最多 512 MiB、每会话累计最多 2 GiB。DNS 解析限时 5 秒，连接源站限时 10 秒，下载空闲超时 60 秒，另受会话总时长限制。
+
+主控只转发允许列表中域名的 80/443，拒绝 IP 字面量、私网/回环/链路本地及其他保留地址。DNS 解析结果逐项检查后，以验证过的公网 IP 建立连接，防止再次解析切换到内网。重定向或镜像选择产生的新目标同样需要在白名单内；仅内置 `*.ec2.archive.ubuntu.com` 支持通配，其他允许条目必须是完整域名。不会自动接受任意自定义软件源或通过环境代理绕过检查。限时令牌是现有可信内网连接上的下载授权，不构成新的节点身份认证或 TCP 通道加密。
+
+管理接口沿用既有登录鉴权：
+
+| 接口 | 请求与返回 |
+|---|---|
+| `GET /api/settings/package-downloads` | 返回 `enabled`、`expires_at`（RFC3339 或 null）、`window_minutes`、`allowed_hosts`、`active_sessions`、`active_connections`、`bytes_transferred`、`last_error` |
+| `PUT /api/settings/package-downloads` | 必填 `enabled`，可选 `window_minutes`（1–60，默认 15）与 `allowed_hosts`；省略可选字段保留当前设置，返回同上状态 |
+
+Web 提供 15/30/60 分钟窗口。下载默认关闭，主控重启后关闭；仅窗口时长和允许域名持久化，token、活动窗口及下载会话不持久化。修改设置会撤销旧会话。关闭的是下载授权，TCP 55556 配置监听继续运行。该通道是主控统一公网出口的流式转发，不提供完整离线缓存；Master 需能访问目标软件源。部署和 Linux 验收见 [主控部署](主控部署.md#agent-安装下载)。
 
 
 ## 扫描摘要

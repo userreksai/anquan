@@ -1,6 +1,7 @@
 package security
 
 import (
+	"anqu/internal/downloadrelay"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -49,9 +50,14 @@ func (commandRunner) Run(ctx context.Context, n string, args ...string) (string,
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, n, args...)
-	cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive", "LC_ALL=C")
+	cmd.Env = commandEnvironment(ctx)
 	b, err := cmd.CombinedOutput()
-	if len(b) > 32768 {
+	// Proxy validation must see every effective APT setting. Truncating this
+	// output could hide a host-specific DIRECT rule at the start of the dump.
+	if n == "apt-config" && len(b) > 1<<20 {
+		return "", errors.New("APT configuration is too large to safely validate package relay settings")
+	}
+	if n != "apt-config" && len(b) > 32768 {
 		b = b[len(b)-32768:]
 	}
 	if err != nil {
@@ -61,8 +67,10 @@ func (commandRunner) Run(ctx context.Context, n string, args ...string) (string,
 }
 
 type Manager struct {
-	Config    Config
-	OutputDir string
+	Config        Config
+	OutputDir     string
+	DownloadRelay *downloadrelay.State
+	downloadProxy *downloadrelay.Proxy
 	// RootDir/Runner exist for hermetic tests; production uses / and exec.CommandContext.
 	RootDir   string
 	Runner    Runner
