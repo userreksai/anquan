@@ -1,6 +1,7 @@
 package audit
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -85,6 +86,10 @@ func TestHistoryInitializationFailureRejectsAssignmentAndKeepsPreviousCache(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Prepare encrypted fixtures before starting the deadline-bound pipe. This
+	// test exercises activation and rollback, rather than encryption scheduling.
+	first := assignedFrame(t, "previous")
+	denied := assignedFrame(t, "repair-denied")
 	d := NewConfigDelivery(cfg, base, "history-init-test")
 	d.ping, d.retry = time.Hour, time.Hour
 	agentConn, masterConn := net.Pipe()
@@ -131,9 +136,16 @@ func TestHistoryInitializationFailureRejectsAssignmentAndKeepsPreviousCache(t *t
 	if err := masterConn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	decoder, encoder := json.NewDecoder(masterConn), json.NewEncoder(masterConn)
+	reader := bufio.NewReader(masterConn)
+	decoder, encoder := json.NewDecoder(reader), json.NewEncoder(masterConn)
 	var hello configFrame
-	if err := decoder.Decode(&hello); err != nil || hello.Type != "hello" {
+	// The wire protocol is NDJSON: consume the complete hello write, including
+	// its delimiter, before writing the response on an unbuffered net.Pipe.
+	helloLine, err := reader.ReadBytes('\n')
+	if err == nil {
+		err = json.Unmarshal(helloLine, &hello)
+	}
+	if err != nil || hello.Type != "hello" {
 		t.Fatalf("missing service hello: %+v %v", hello, err)
 	}
 	sendAssignment := func(frame configFrame) configFrame {
@@ -158,7 +170,6 @@ func TestHistoryInitializationFailureRejectsAssignmentAndKeepsPreviousCache(t *t
 			t.Fatalf("configuration %s did not reach expected lifecycle stage", want)
 		}
 	}
-	first := assignedFrame(t, "previous")
 	if ack := sendAssignment(first); ack.Error != "" {
 		t.Fatal(ack.Error)
 	}
@@ -167,7 +178,6 @@ func TestHistoryInitializationFailureRejectsAssignmentAndKeepsPreviousCache(t *t
 	if got := read(t, d.cachePath()); got != first.Ciphertext {
 		t.Fatal("successful assignment was not persisted")
 	}
-	denied := assignedFrame(t, "repair-denied")
 	if ack := sendAssignment(denied); !strings.Contains(ack.Error, "history script repair denied") {
 		t.Fatalf("history initialization failure was not reported in ACK: %+v", ack)
 	}

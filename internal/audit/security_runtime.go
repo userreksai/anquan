@@ -118,6 +118,7 @@ func componentConfig(c Config) security.Config {
 // failed validation/reload keeps the previous encrypted assignment active.
 func applySecurityComponents(ctx context.Context, c Config, writer io.Writer) error {
 	manager := security.NewManager(componentConfig(c), securityDataDir(c))
+	manager.DownloadRelay = c.downloadRelay
 	statuses, err := manager.Apply(ctx)
 	if err != nil {
 		_ = writeState(filepath.Join(securityDataDir(c), "apply-error.state"), "security-apply-error", map[string]any{"error": err.Error(), "components": statuses, "attempted_at": time.Now().UTC()})
@@ -198,6 +199,7 @@ func securityLoop(ctx context.Context, c Config, writer io.Writer) {
 			return
 		}
 		manager := security.NewManager(componentConfig(c), securityDataDir(c))
+		manager.DownloadRelay = c.downloadRelay
 		_ = emit(security.Event{Type: "component_status", Time: time.Now().UTC(), Data: map[string]any{"components": manager.Status(ctx)}})
 	}
 	var workers sync.WaitGroup
@@ -209,6 +211,7 @@ func securityLoop(ctx context.Context, c Config, writer io.Writer) {
 			// Keep the configuration connection and heartbeats alive meanwhile.
 			_ = applySecurityComponents(ctx, c, writer)
 			manager := security.NewManager(c.Security.Config, securityDataDir(c))
+			manager.DownloadRelay = c.downloadRelay
 			for ctx.Err() == nil {
 				if err := manager.Run(ctx, emit); err != nil && ctx.Err() == nil {
 					_ = writeLog(c, writer, time.Now(), "security_error", map[string]string{"error": err.Error()})

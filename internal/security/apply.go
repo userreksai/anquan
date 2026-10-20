@@ -28,6 +28,12 @@ const firewallUnitPath = "/etc/systemd/system/anquan-ssh-allow.service"
 func (m *Manager) Apply(ctx context.Context) ([]ComponentStatus, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	defer func() {
+		if m.downloadProxy != nil {
+			_ = m.downloadProxy.Close()
+			m.downloadProxy = nil
+		}
+	}()
 	m.Config.Normalize()
 	if err := m.Config.Validate(); err != nil {
 		return nil, err
@@ -298,12 +304,25 @@ func (m *Manager) ensurePackage(ctx context.Context, binary, deb, rpm string) er
 	}
 	for _, pkg := range []string{"apt-get", "dnf", "yum"} {
 		if _, err := m.Runner.LookPath(pkg); err == nil {
+			proxy, proxyErr := m.packageProxy(ctx)
+			if proxyErr != nil {
+				return proxyErr
+			}
+			ctx = relayCommandContext(ctx, proxy)
 			args := []string{"install", "-y", rpm}
 			if pkg == "apt-get" {
-				if _, err = m.Runner.Run(ctx, pkg, "update"); err != nil {
+				options, optionErr := m.aptProxyOptions(ctx, proxy)
+				if optionErr != nil {
+					return optionErr
+				}
+				if _, err = m.Runner.Run(ctx, pkg, append(options, "update")...); err != nil {
 					return err
 				}
-				args = []string{"install", "-y", "--no-install-recommends", deb}
+				args = append(options, "install", "-y", "--no-install-recommends", deb)
+			} else if proxy != "" {
+				// Per-repository proxy=_none_ overrides the main setting. Override
+				// every repository too and disable plugins with independent networking.
+				args = append([]string{"--noplugins", "--setopt=proxy=" + proxy, "--setopt=*.proxy=" + proxy}, args...)
 			}
 			if _, err = m.Runner.Run(ctx, pkg, args...); err != nil {
 				return err
