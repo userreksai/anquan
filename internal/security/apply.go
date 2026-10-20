@@ -315,7 +315,7 @@ func (m *Manager) ensurePackage(ctx context.Context, binary, deb, rpm string) er
 				if optionErr != nil {
 					return optionErr
 				}
-				if _, err = m.Runner.Run(ctx, pkg, append(options, "update")...); err != nil {
+				if _, err = m.runAPT(ctx, append(options, "update")...); err != nil {
 					return err
 				}
 				args = append(options, "install", "-y", "--no-install-recommends", deb)
@@ -324,7 +324,12 @@ func (m *Manager) ensurePackage(ctx context.Context, binary, deb, rpm string) er
 				// every repository too and disable plugins with independent networking.
 				args = append([]string{"--noplugins", "--setopt=proxy=" + proxy, "--setopt=*.proxy=" + proxy}, args...)
 			}
-			if _, err = m.Runner.Run(ctx, pkg, args...); err != nil {
+			if pkg == "apt-get" {
+				_, err = m.runAPT(ctx, args...)
+			} else {
+				_, err = m.Runner.Run(ctx, pkg, args...)
+			}
+			if err != nil {
 				return err
 			}
 			if _, err = m.Runner.LookPath(binary); err != nil {
