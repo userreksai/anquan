@@ -22,7 +22,7 @@ func nativeOwnership(info os.FileInfo) (uint32, uint32, string) {
 	return 0, 0, ""
 }
 
-func watchNativePaths(parent context.Context, roots []string, excluded func(string) bool) (<-chan nativeWatchEvent, func()) {
+func watchNativePaths(parent context.Context, roots []string, excluded func(string) bool, captures ...func(string, uint32) *nativeFile) (<-chan nativeWatchEvent, func()) {
 	ctx, cancel := context.WithCancel(parent)
 	ch := make(chan nativeWatchEvent, 1024)
 	fd, err := syscall.InotifyInit1(syscall.IN_CLOEXEC | syscall.IN_NONBLOCK)
@@ -32,13 +32,24 @@ func watchNativePaths(parent context.Context, roots []string, excluded func(stri
 		return ch, cancel
 	}
 	done := make(chan struct{})
+	ready := make(chan struct{})
 	go func() {
 		defer close(done)
 		defer close(ch)
 		defer syscall.Close(fd)
 		watches := map[int]string{}
 		watched := map[string]bool{}
+		initializing := true
 		push := func(event nativeWatchEvent) bool {
+			// Setup may encounter many unwatchable roots before the consumer
+			// receives readiness. Never deadlock startup on diagnostic overflow.
+			if initializing && event.Err != nil {
+				select {
+				case ch <- event:
+				default:
+				}
+				return ctx.Err() == nil
+			}
 			select {
 			case ch <- event:
 				return true
@@ -59,6 +70,9 @@ func watchNativePaths(parent context.Context, roots []string, excluded func(stri
 			wd, err := syscall.InotifyAddWatch(fd, path, syscall.IN_CREATE|syscall.IN_DELETE|syscall.IN_MODIFY|syscall.IN_ATTRIB|syscall.IN_MOVED_FROM|syscall.IN_MOVED_TO|syscall.IN_DELETE_SELF|syscall.IN_MOVE_SELF|syscall.IN_CLOSE_WRITE)
 			if err != nil {
 				return err
+			}
+			if previous, exists := watches[wd]; exists && previous != path {
+				delete(watched, previous)
 			}
 			watches[wd] = path
 			watched[path] = true
@@ -104,7 +118,9 @@ func watchNativePaths(parent context.Context, roots []string, excluded func(stri
 			}
 		}
 		refresh()
-		ticker := time.NewTicker(100 * time.Millisecond)
+		initializing = false
+		close(ready)
+		ticker := time.NewTicker(10 * time.Millisecond)
 		defer ticker.Stop()
 		buffer := make([]byte, 64<<10)
 		for {
@@ -163,9 +179,18 @@ func watchNativePaths(parent context.Context, roots []string, excluded func(stri
 						relevant = relevant || inside(path, root)
 					}
 					if relevant && !excluded(path) {
-						if !push(nativeWatchEvent{Path: path, Mask: mask}) {
+						activity := nativeWatchEvent{Path: path, Mask: mask, At: time.Now().UTC()}
+						if len(captures) > 0 {
+							activity.Snapshot = captures[0](path, mask)
+						}
+						if !push(activity) {
 							return
 						}
+					}
+					if mask&(syscall.IN_MOVE_SELF|syscall.IN_DELETE_SELF) != 0 {
+						delete(watches, wd)
+						delete(watched, parentPath)
+						_, _ = syscall.InotifyRmWatch(fd, uint32(wd))
 					}
 					if mask&(syscall.IN_CREATE|syscall.IN_MOVED_TO|syscall.IN_DELETE_SELF|syscall.IN_MOVE_SELF) != 0 {
 						refreshNeeded = true
@@ -177,5 +202,9 @@ func watchNativePaths(parent context.Context, roots []string, excluded func(stri
 			}
 		}
 	}()
+	select {
+	case <-ready:
+	case <-ctx.Done():
+	}
 	return ch, func() { cancel(); <-done }
 }

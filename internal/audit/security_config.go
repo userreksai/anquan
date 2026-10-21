@@ -24,11 +24,12 @@ type SecuritySSHAuthConfig struct {
 }
 
 type NativeFIMConfig struct {
-	Enabled             bool     `json:"enabled" yaml:"enabled"`
-	Paths               []string `json:"paths" yaml:"paths"`
-	PollIntervalSeconds int      `json:"poll_interval_seconds" yaml:"poll_interval_seconds"`
-	ReportChanges       bool     `json:"report_changes" yaml:"report_changes"`
-	MaxDiffBytes        int      `json:"max_diff_bytes" yaml:"max_diff_bytes"`
+	Enabled               bool     `json:"enabled" yaml:"enabled"`
+	Paths                 []string `json:"paths" yaml:"paths"`
+	PollIntervalSeconds   int      `json:"poll_interval_seconds" yaml:"poll_interval_seconds"`
+	ReportChanges         bool     `json:"report_changes" yaml:"report_changes"`
+	CaptureCreatedContent *bool    `json:"capture_created_content,omitempty" yaml:"capture_created_content,omitempty"`
+	MaxDiffBytes          int      `json:"max_diff_bytes" yaml:"max_diff_bytes"`
 }
 
 func normalizeSecurity(c *Config, base string, rules pathRules) error {
@@ -65,6 +66,10 @@ func normalizeSecurity(c *Config, base string, rules pathRules) error {
 	f := c.Security.NativeFIM
 	if f == nil || !f.Enabled {
 		return nil
+	}
+	if f.CaptureCreatedContent == nil {
+		enabled := true
+		f.CaptureCreatedContent = &enabled
 	}
 	if f.PollIntervalSeconds == 0 {
 		f.PollIntervalSeconds = 30
