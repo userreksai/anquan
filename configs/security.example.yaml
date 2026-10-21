@@ -75,8 +75,9 @@ security:
       - /etc/crontab
       - /etc/cron.d
     poll_interval_seconds: 30
+    capture_created_content: true  # 基线后新建文本及其后续版本，删除后仍可追溯；可显式关闭
     report_changes: false
-    max_diff_bytes: 8192
+    max_diff_bytes: 8192           # 每侧文本留存上限；超限保留前缀并标记，不是完整文件备份
 
   # 与原有成功登录通知独立：失败事件入库，5分钟同IP达5次产生告警。
   ssh_auth:
