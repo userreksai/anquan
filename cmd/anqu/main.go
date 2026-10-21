@@ -19,7 +19,7 @@ import (
 	"anqu/internal/selfupdate"
 )
 
-const version = "0.7.5"
+const version = "0.7.6"
 
 func main() {
 	os.Exit(runPrepared(os.Args[1:], os.Stdout, os.Stderr, sealed.Config, os.Executable, install.Prepare))

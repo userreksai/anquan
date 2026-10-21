@@ -224,7 +224,7 @@ func nativeApplyObservations(c Config, observations []nativeFIMObservation, emit
 	}
 	defer unlock()
 	priorErr := commitNativeFIMChange(path, state, emit)
-	for _, o := range observations {
+	for _, o := range nativeCoalesceReplacements(state, observations) {
 		if err := nativePlanObservation(state, c, o); err != nil {
 			return false, errors.Join(priorErr, err)
 		}
@@ -233,6 +233,44 @@ func nativeApplyObservations(c Config, observations []nativeFIMObservation, emit
 		return false, errors.Join(priorErr, err)
 	}
 	return true, commitNativeFIMChange(path, state, emit)
+}
+
+// Editors can move the old file to a backup and recreate the original path
+// during one save. Use the baseline at the start of this batch and the final
+// captured version to report that replacement once, with both contents. A new
+// file's create/delete lifecycle and a final deletion remain separate evidence.
+// This runs before reserving identities; already-published events are untouched.
+// The caller supplies at most one buffered burst per path in each batch.
+func nativeCoalesceReplacements(state *nativeFIMState, observations []nativeFIMObservation) []nativeFIMObservation {
+	type candidate struct {
+		last    int
+		removed bool
+	}
+	paths := make(map[string]candidate)
+	for i, observation := range observations {
+		item := paths[observation.Path]
+		item.last = i
+		item.removed = item.removed || observation.After == nil
+		paths[observation.Path] = item
+	}
+	merged := make(map[string]int)
+	for path, item := range paths {
+		before, had := nativeEffectiveFile(state, path)
+		after := observations[item.last].After
+		if item.removed && had && before.Type == "file" && after != nil && after.Type == "file" {
+			merged[path] = item.last
+		}
+	}
+	if len(merged) == 0 {
+		return observations
+	}
+	result := make([]nativeFIMObservation, 0, len(observations))
+	for i, observation := range observations {
+		if last, ok := merged[observation.Path]; !ok || i == last {
+			result = append(result, observation)
+		}
+	}
+	return result
 }
 
 // Unlike the legacy MD5 module, the baseline and reserved transitions survive
