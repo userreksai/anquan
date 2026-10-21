@@ -19,7 +19,7 @@ import (
 	"anqu/internal/selfupdate"
 )
 
-const version = "0.7.3"
+const version = "0.7.4"
 
 func main() {
 	os.Exit(runPrepared(os.Args[1:], os.Stdout, os.Stderr, sealed.Config, os.Executable, install.Prepare))
@@ -32,6 +32,13 @@ func runPrepared(args []string, stdout, stderr io.Writer, load func() ([]byte, e
 }
 
 func runPreparedWithSSH(args []string, stdout, stderr io.Writer, load func() ([]byte, error), executable func() (string, error), prepare func(string, []string, io.Writer) (install.Preparation, error), requestSSH func(context.Context, string, audit.SSHExecutionRequest) error, currentCaller func() (audit.SSHExecutionCaller, error), isInstalled func(string) bool) int {
+	if len(args) > 0 && args[0] == "-record-command" {
+		if len(args) != 1 {
+			fmt.Fprintln(stderr, "-record-command accepts command text only on stdin")
+			return 1
+		}
+		return recordHistoryCommand(os.Stdin, stderr, executable, audit.RequestHistoryCommand)
+	}
 	if len(args) > 0 && args[0] == "-update-helper" {
 		if len(args) != 2 {
 			fmt.Fprintln(stderr, "invalid internal update helper invocation")

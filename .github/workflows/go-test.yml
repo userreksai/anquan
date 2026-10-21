@@ -34,3 +34,7 @@ jobs:
         run: go vet ./...
       - name: Check collector, delivery and update races
         run: go test -race ./internal/security ./internal/downloadrelay ./internal/selfupdate ./internal/audit -count=1
+      - name: Verify fresh command logging as root and an ordinary user
+        run: |
+          go test -race -c -o "$RUNNER_TEMP/anquan-history.test" ./internal/audit
+          sudo "$RUNNER_TEMP/anquan-history.test" -test.run 'TestHistoryCommand|TestManagedHistory|TestEnsureHistoryScript|TestHistoryInstallation' -test.count=1 -test.v

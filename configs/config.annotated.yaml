@@ -101,8 +101,8 @@ login:
   # wtmp：改 source 为 wtmp，path 填 /var/log/wtmp，可添加 last_command: last。
   # 要关闭成功登录采集，设置 enabled: false；直接省略 login 会默认开启。
 
-# 操作命令采集默认关闭。仅设置 true 不会自动在系统中安装命令记录脚本。
-# 开启条件：已有按约定格式持续追加的 history.log、server 非空、Master 支持 ACK。
+# 操作命令采集默认关闭。v0.7.4 标准 Linux 安装启用默认路径后自动补齐缺失脚本和日志。
+# 开启条件：server 非空、Master 支持 ACK；已有 SSH 会话需重新登录加载新脚本。
 history:
   enabled: false
   path: /var/log/history.log

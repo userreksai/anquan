@@ -47,6 +47,7 @@ ProcessMonitoring:
   # 白名单仅按完整命令精确匹配（不支持通配符/正则），且不会免除 exists 检查。
 
 # 开启前先填写 server，并更新支持命令确认应答的 Master。
+# v0.7.4 标准 Linux 安装启用默认路径后自动补齐缺失脚本/日志，已有 SSH 会话需重登。
 history:
   enabled: false            # 改为 true 开启；首次补传已有命令，此后增量读取
   path: /var/log/history.log

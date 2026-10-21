@@ -77,6 +77,7 @@ func prepare(path string, args []string, writer io.Writer, paths layout, ops run
 		}
 		if writer != nil {
 			fmt.Fprintf(writer, "Installed %s; SSH login hook ready; %s enabled and started with Master %s.\n", paths.executable, ServiceName, defaults.MasterAddress)
+			fmt.Fprintln(writer, "Command logging is initialized when enabled by the active history configuration; reconnect SSH after it is applied.")
 		}
 		return Preparation{Path: paths.executable, InstallOnly: true}, nil
 	}

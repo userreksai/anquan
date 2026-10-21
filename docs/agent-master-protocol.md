@@ -285,7 +285,7 @@ trigger 不读取或更新 `.logins`，不更新 Prom；每次本机 `ssh_execut
 
 重复事件也回复匹配原报文 `event_id` 的 ACK。格式/校验错误或落库失败不确认。Agent 每条最多等待 2 秒，未收到匹配确认则保留加密 `.commands` 中的待发批次，随后重试；重启仍使用相同 ID。每个配置的 Master 均确认后才清空该批次。此机制为至少一次传输、主控幂等入库；依赖保留 Agent 状态和 Master 数据库。网络须允许 UDP 请求及返回流量。
 
-命令采集按单行日志解析；非法格式及无法容纳于 UDP 的记录以 `alert` 上报，`module: history`、`kind: parse_error`、`target: 来源日志`，描述包含字节位置，并同样请求 ACK。文件读取/状态错误写 Agent 本机 `history_error` 日志。Agent 不修改或清理源日志。
+命令采集按单行日志解析；非法格式及无法容纳于 UDP 的记录以 `alert` 上报，`module: history`、`kind: parse_error`、`target: 来源日志`，描述包含字节位置，并同样请求 ACK。文件读取/状态错误写 Agent 本机 `history_error` 日志。读取采集不会清空或轮转源日志；v0.7.4 的本地受管命令入口仅向默认日志追加单行记录，不改变此 UDP 协议。
 
 升级顺序为 Master、Web、Agent；旧 Master 不支持 `command_history` 或落库 ACK，新 Agent 会保留待发数据并持续等待，不会把发送成功当作落库成功。
 
