@@ -32,7 +32,29 @@ func initializeHistoryScript(c Config, writer io.Writer) error {
 	if runtime.GOOS != "linux" || c.History == nil || !c.History.Enabled || c.History.Path != "/var/log/history.log" {
 		return nil
 	}
-	return initializeHistoryScriptAt(c, writer, historyAuditScriptPath)
+	if filepath.Clean(c.runtimeDir) != filepath.Dir(historyCommandBinaryPath) {
+		// Embedders with a different runtime location retain their external
+		// writer. A global profile must not point at a different service socket.
+		return initializeHistoryScriptAt(c, writer, historyAuditScriptPath)
+	}
+	if err := initializeHistoryManagedAt(c, writer, historyAuditScriptPath, c.History.Path, historyCommandBinaryPath); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Only the continuous service owns the recording socket. A one-shot history
+// read may repair/install a hook while that service is already listening.
+func initializeHistoryService(c Config, writer io.Writer) error {
+	if err := initializeHistoryScript(c, writer); err != nil {
+		return err
+	}
+	if runtime.GOOS == "linux" && filepath.Clean(c.runtimeDir) == filepath.Dir(historyCommandBinaryPath) && c.History != nil && c.History.Enabled && c.History.Path == "/var/log/history.log" && isManagedHistoryScript(historyAuditScriptPath) {
+		if err := preflightHistoryCommands(c); err != nil {
+			return fmt.Errorf("history command service initialization failed: %w", err)
+		}
+	}
+	return nil
 }
 
 func initializeHistoryScriptAt(c Config, writer io.Writer, scriptPath string) error {

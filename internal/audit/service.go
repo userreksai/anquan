@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -49,7 +50,7 @@ func serveWithHeartbeatInterval(ctx context.Context, c Config, writer io.Writer,
 }
 
 func serveRuntime(ctx context.Context, c Config, writer io.Writer, version string, scan func(Config, io.Writer) (Report, OutputPaths, error), heartbeatInterval time.Duration, delivery *ConfigDelivery) error {
-	return serveRuntimeWithHistoryInitializer(ctx, c, writer, version, scan, heartbeatInterval, delivery, initializeHistoryScript)
+	return serveRuntimeWithHistoryInitializer(ctx, c, writer, version, scan, heartbeatInterval, delivery, initializeHistoryService)
 }
 
 func serveRuntimeWithHistoryInitializer(ctx context.Context, c Config, writer io.Writer, version string, scan func(Config, io.Writer) (Report, OutputPaths, error), heartbeatInterval time.Duration, delivery *ConfigDelivery, initialize func(Config, io.Writer) error) error {
@@ -95,7 +96,15 @@ func serveRuntimeWithHistoryInitializer(ctx context.Context, c Config, writer io
 		}
 		workerCtx, cancel := context.WithCancel(ctx)
 		var workers sync.WaitGroup
-		workers.Add(4)
+		workers.Add(5)
+		go func() {
+			defer workers.Done()
+			if runtime.GOOS == "linux" && filepath.Clean(cfg.runtimeDir) == filepath.Dir(historyCommandBinaryPath) && cfg.History != nil && cfg.History.Enabled && cfg.History.Path == "/var/log/history.log" {
+				if err := serveHistoryCommands(workerCtx, cfg, writer); err != nil && workerCtx.Err() == nil {
+					_ = writeLog(cfg, writer, time.Now(), "history_error", map[string]string{"path": cfg.History.Path, "error": err.Error()})
+				}
+			}
+		}()
 		go func() {
 			defer workers.Done()
 			securityLoop(workerCtx, cfg, writer)

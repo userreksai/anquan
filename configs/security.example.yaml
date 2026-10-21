@@ -2,8 +2,8 @@
 # 机器先按原方式运行 Agent，再通过原下发功能选择机器应用本配置。
 # TCP 配置地址/端口仍由原 agent.service 决定；此处仅设置原 UDP 上报目标。
 # 已有完整配置时优先只合并 security 段，保留原 history、巡检和上报配置。
-# 本例开启原有操作命令采集，要求已有脚本持续写入 /var/log/history.log；
-# 没有命令日志的节点先将 history.enabled 设为 false。Agent 不会自动安装记录脚本。
+# 本例开启操作命令采集，v0.7.4 标准 Linux 安装会补齐缺失的默认命令脚本与日志；
+# 旧版 Agent 或自定义日志路径仍需已有记录机制，不需要采集时将 history.enabled 设为 false。
 # Linux 启用 history 且使用默认日志源时，会备份修复已知脚本截断写法；旧会话需退出重登。
 # 仅本次已知损坏可核验后自动归档旧命令状态并续采，不覆盖其他脚本或自动重置未知截断。
 output_dir: /usr/local/anquan
