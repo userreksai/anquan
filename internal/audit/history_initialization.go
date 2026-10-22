@@ -29,13 +29,16 @@ type historyScriptRecovery struct {
 }
 
 func initializeHistoryScript(c Config, writer io.Writer) error {
-	if runtime.GOOS != "linux" || c.History == nil || !c.History.Enabled || c.History.Path != "/var/log/history.log" {
+	if runtime.GOOS != "linux" || c.History == nil || !c.History.Enabled {
 		return nil
 	}
 	if filepath.Clean(c.runtimeDir) != filepath.Dir(historyCommandBinaryPath) {
 		// Embedders with a different runtime location retain their external
 		// writer. A global profile must not point at a different service socket.
-		return initializeHistoryScriptAt(c, writer, historyAuditScriptPath)
+		if c.History.Path == "/var/log/history.log" {
+			return initializeHistoryScriptAt(c, writer, historyAuditScriptPath)
+		}
+		return nil
 	}
 	if err := initializeHistoryManagedAt(c, writer, historyAuditScriptPath, c.History.Path, historyCommandBinaryPath); err != nil {
 		return err
@@ -49,7 +52,7 @@ func initializeHistoryService(c Config, writer io.Writer) error {
 	if err := initializeHistoryScript(c, writer); err != nil {
 		return err
 	}
-	if runtime.GOOS == "linux" && filepath.Clean(c.runtimeDir) == filepath.Dir(historyCommandBinaryPath) && c.History != nil && c.History.Enabled && c.History.Path == "/var/log/history.log" && isManagedHistoryScript(historyAuditScriptPath) {
+	if runtime.GOOS == "linux" && filepath.Clean(c.runtimeDir) == filepath.Dir(historyCommandBinaryPath) && c.History != nil && c.History.Enabled && isManagedHistoryScript(historyAuditScriptPath) {
 		if err := preflightHistoryCommands(c); err != nil {
 			return fmt.Errorf("history command service initialization failed: %w", err)
 		}
@@ -58,6 +61,10 @@ func initializeHistoryService(c Config, writer io.Writer) error {
 }
 
 func initializeHistoryScriptAt(c Config, writer io.Writer, scriptPath string) error {
+	return initializeHistoryScriptAtWithRecoveryPolicy(c, writer, scriptPath, true)
+}
+
+func initializeHistoryScriptAtWithRecoveryPolicy(c Config, writer io.Writer, scriptPath string, allowAppendRecovery bool) error {
 	if c.History == nil || !c.History.Enabled {
 		return nil
 	}
@@ -72,7 +79,7 @@ func initializeHistoryScriptAt(c Config, writer io.Writer, scriptPath string) er
 	repair, err := repairHistoryScript(scriptPath, func(repair historyScriptRepair) error {
 		// Deferring startup logging changes no source bytes. It must never
 		// authorize replay/reset of an otherwise valid command cursor.
-		if !repair.AppendRepaired {
+		if !repair.AppendRepaired || !allowAppendRecovery {
 			return migrateHistoryScriptRecoveryHash(c, scriptPath, repair)
 		}
 		return recordHistoryScriptRecovery(c, scriptPath, repair.UpdatedSHA256)

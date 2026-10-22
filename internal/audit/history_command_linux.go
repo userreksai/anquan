@@ -16,6 +16,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 )
@@ -76,7 +77,7 @@ func RequestHistoryCommand(parent context.Context, baseDir, command string) erro
 }
 
 func serveHistoryCommands(ctx context.Context, c Config, writer io.Writer) error {
-	if filepath.Clean(c.runtimeDir) != filepath.Dir(historyCommandBinaryPath) || c.History == nil || !c.History.Enabled || c.History.Path != "/var/log/history.log" || !isManagedHistoryScript(historyAuditScriptPath) {
+	if filepath.Clean(c.runtimeDir) != filepath.Dir(historyCommandBinaryPath) || c.History == nil || !c.History.Enabled || !isManagedHistoryScript(historyAuditScriptPath) {
 		return nil
 	}
 	return serveHistoryCommandsAt(ctx, c.runtimeDir, c.History.Path, c.History.location, func() error {
@@ -90,7 +91,7 @@ func serveHistoryCommands(ctx context.Context, c Config, writer io.Writer) error
 // real bind detects occupied paths and permission errors before acknowledging
 // installation; it leaves no socket behind for the actual worker to replace.
 func preflightHistoryCommands(c Config) error {
-	if c.History == nil || !c.History.Enabled || c.History.Path != "/var/log/history.log" {
+	if c.History == nil || !c.History.Enabled {
 		return nil
 	}
 	if os.Geteuid() != 0 || !filepath.IsAbs(c.runtimeDir) {
@@ -216,7 +217,7 @@ func handleHistoryCommand(parent context.Context, conn *net.UnixConn, logPath st
 		return
 	}
 	account, err := user.LookupId(strconv.FormatUint(uint64(cred.Uid), 10))
-	if err != nil || strings.ContainsAny(account.Username, "]\r\n\x00") || account.Username == "" || len(account.Username) > 256 {
+	if err != nil || !utf8.ValidString(account.Username) || strings.ContainsAny(account.Username, "]\r\n\x00") || account.Username == "" || len(account.Username) > 256 {
 		finish(fmt.Errorf("command peer has no valid operating system account"))
 		return
 	}
@@ -319,28 +320,45 @@ func validHistoryCommandLogParent(path string, info os.FileInfo) error {
 }
 
 func validHistoryCommandLog(info os.FileInfo) error {
+	if err := validHistoryCommandLogInode(info); err != nil {
+		return err
+	}
+	owner := info.Sys().(*syscall.Stat_t)
+	if owner.Uid != 0 || owner.Gid != 0 || info.Mode().Perm() != 0644 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		return fmt.Errorf("command log must be owned by root:root with mode 0644")
+	}
+	return nil
+}
+
+func validHistoryCommandLogInode(info os.FileInfo) error {
 	owner, ok := info.Sys().(*syscall.Stat_t)
-	if !info.Mode().IsRegular() || !sshExecutionRootOwned(info) || info.Mode().Perm()&0022 != 0 || !ok || owner.Nlink != 1 {
-		return fmt.Errorf("command log must be a root-owned regular file with one link and no group or public write access")
+	if !info.Mode().IsRegular() || !ok || owner.Nlink != 1 {
+		return fmt.Errorf("command log must be a regular file with one link")
 	}
 	return nil
 }
 
 func ensureHistoryCommandLog(path string) (bool, error) {
+	if os.Geteuid() != 0 {
+		return false, fmt.Errorf("managing the command log requires root")
+	}
 	if err := verifyHistoryCommandLogParents(path); err != nil {
 		return false, err
 	}
 	info, err := os.Lstat(path)
+	created := false
+	flags := unix.O_RDWR | unix.O_APPEND | unix.O_NOFOLLOW | unix.O_CLOEXEC | unix.O_NONBLOCK
 	if err == nil {
-		return false, validHistoryCommandLog(info)
-	}
-	if !os.IsNotExist(err) {
+		if err := validHistoryCommandLogInode(info); err != nil {
+			return false, err
+		}
+	} else if os.IsNotExist(err) {
+		flags |= unix.O_CREAT | unix.O_EXCL
+		created = true
+	} else {
 		return false, err
 	}
-	if os.Geteuid() != 0 {
-		return false, fmt.Errorf("creating the command log requires root")
-	}
-	fd, err := unix.Open(path, unix.O_WRONLY|unix.O_APPEND|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0644)
+	fd, err := unix.Open(path, flags, 0644)
 	if err == unix.EEXIST {
 		return ensureHistoryCommandLog(path)
 	}
@@ -349,10 +367,16 @@ func ensureHistoryCommandLog(path string) (bool, error) {
 	}
 	f := os.NewFile(uintptr(fd), path)
 	defer f.Close()
-	if err := f.Chmod(0644); err != nil {
-		return true, err
+	ctx, cancel := context.WithTimeout(context.Background(), historyCommandTimeout)
+	defer cancel()
+	if err := lockHistoryCommandLog(ctx, fd); err != nil {
+		return created, err
 	}
-	return true, f.Sync()
+	defer unix.Flock(fd, unix.LOCK_UN)
+	if err := normalizeHistoryCommandLog(f, path); err != nil {
+		return created, err
+	}
+	return created, f.Sync()
 }
 
 func appendHistoryCommand(ctx context.Context, path string, line []byte) error {
@@ -362,23 +386,52 @@ func appendHistoryCommand(ctx context.Context, path string, line []byte) error {
 	if err := verifyHistoryCommandLogParents(path); err != nil {
 		return err
 	}
-	fd, err := unix.Open(path, unix.O_WRONLY|unix.O_APPEND|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_APPEND|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return fmt.Errorf("open command log: %w", err)
 	}
 	f := os.NewFile(uintptr(fd), path)
 	defer f.Close()
+	if err := lockHistoryCommandLog(ctx, fd); err != nil {
+		return err
+	}
+	defer unix.Flock(fd, unix.LOCK_UN)
+	if err := normalizeHistoryCommandLog(f, path); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	info, err := f.Stat()
 	if err != nil {
 		return err
 	}
-	if err := validHistoryCommandLog(info); err != nil {
-		return err
+	if info.Size() > 0 {
+		var tail [1]byte
+		if _, err := f.ReadAt(tail[:], info.Size()-1); err != nil {
+			return err
+		}
+		if tail[0] != '\n' {
+			// Preserve a retained partial legacy record and start the new one on
+			// its own physical line. Both bytes are appended under the same lock.
+			line = append([]byte{'\n'}, line...)
+		}
 	}
+	written, err := f.Write(line)
+	if err == nil && written != len(line) {
+		return io.ErrShortWrite
+	}
+	return err
+}
+
+func lockHistoryCommandLog(ctx context.Context, fd int) error {
 	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		err := unix.Flock(fd, unix.LOCK_EX|unix.LOCK_NB)
 		if err == nil {
-			break
+			return nil
 		}
 		if err != unix.EWOULDBLOCK && err != unix.EAGAIN {
 			return err
@@ -391,22 +444,54 @@ func appendHistoryCommand(ctx context.Context, path string, line []byte) error {
 		case <-timer.C:
 		}
 	}
-	defer unix.Flock(fd, unix.LOCK_UN)
+}
+
+// Only metadata of the verified opened inode is changed. The file's retained
+// bytes and identity stay intact, so an existing collector cursor remains valid.
+func normalizeHistoryCommandLog(f *os.File, path string) error {
+	if os.Geteuid() != 0 {
+		return fmt.Errorf("managing the command log requires root")
+	}
+	if err := verifyHistoryCommandLogParents(path); err != nil {
+		return err
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if err := validHistoryCommandLogInode(info); err != nil {
+		return err
+	}
 	current, err := os.Lstat(path)
 	if err != nil || !os.SameFile(info, current) {
-		return fmt.Errorf("command log changed before append")
+		return fmt.Errorf("command log changed before normalization")
 	}
-	if err := validHistoryCommandLog(current); err != nil {
+	if err := validHistoryCommandLogInode(current); err != nil {
 		return err
 	}
-	if err := ctx.Err(); err != nil {
+	owner := info.Sys().(*syscall.Stat_t)
+	if owner.Uid != 0 || owner.Gid != 0 {
+		if err := f.Chown(0, 0); err != nil {
+			return fmt.Errorf("set command log owner: %w", err)
+		}
+	}
+	if info.Mode().Perm() != 0644 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 {
+		if err := f.Chmod(0644); err != nil {
+			return fmt.Errorf("set command log permissions: %w", err)
+		}
+	}
+	info, err = f.Stat()
+	if err != nil {
 		return err
 	}
-	written, err := f.Write(line)
-	if err == nil && written != len(line) {
-		return io.ErrShortWrite
+	if err := validHistoryCommandLog(info); err != nil {
+		return err
 	}
-	return err
+	current, err = os.Lstat(path)
+	if err != nil || !os.SameFile(info, current) {
+		return fmt.Errorf("command log changed during normalization")
+	}
+	return validHistoryCommandLog(current)
 }
 
 // fd 2 normally belongs to the recording child, or to its interactive parent

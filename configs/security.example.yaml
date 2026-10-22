@@ -2,10 +2,12 @@
 # 机器先按原方式运行 Agent，再通过原下发功能选择机器应用本配置。
 # TCP 配置地址/端口仍由原 agent.service 决定；此处仅设置原 UDP 上报目标。
 # 已有完整配置时优先只合并 security 段，保留原 history、巡检和上报配置。
-# 本例开启操作命令采集，v0.7.4 标准 Linux 安装会补齐缺失的默认命令脚本与日志；
-# 旧版 Agent 或自定义日志路径仍需已有记录机制，不需要采集时将 history.enabled 设为 false。
-# Linux 启用 history 且使用默认日志源时，会备份修复已知脚本截断写法；旧会话需退出重登。
-# 仅本次已知损坏可核验后自动归档旧命令状态并续采，不覆盖其他脚本或自动重置未知截断。
+# 本例开启操作命令采集，当前标准 Linux 安装以 Agent 标准统一命令脚本，支持自定义日志path；
+# 已有自定义/旧脚本不一致时先备份再原子替换；日志root:root 0644，保留内容和游标。
+# 旧版 Agent 或自定义部署目录仍需外部记录机制，不需要采集时将 history.enabled 设为 false。
+# 仅采集接入钩子的交互Bash；接管其他DEBUG trap，可修改的PROMPT_COMMAND属性会规范化。
+# 只读等限制会明确报错；旧会话需退出重登，未生成或丢失的命令不能补回。
+# 已知200>旧脚本先修复再转换，仅默认日志源可生成恢复凭证；不自动重置自定义源或未知截断。
 output_dir: /usr/local/anquan
 state_file: state/md5.json
 timezone: Asia/Shanghai
@@ -14,7 +16,7 @@ timezone: Asia/Shanghai
 # history 位于完整 YAML 顶层，不填写到“Tetragon 配置”输入框。
 # path、timezone 沿用原 history 配置；不要删除已有 .commands 游标。
 # output_dir、state_file 也沿用原值，避免改变命令状态文件位置。
-# Local 应与写日志脚本的 date 时区一致，不受顶层 timezone 设置影响。
+# 受管服务按history.timezone写入并解释；外部脚本须使用相同时区，不受顶层timezone影响。
 # 首次启用会从头分批补传已有日志，正常命令只入库、不发送告警。
 history:
   enabled: true

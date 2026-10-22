@@ -99,7 +99,7 @@ func serveRuntimeWithHistoryInitializer(ctx context.Context, c Config, writer io
 		workers.Add(5)
 		go func() {
 			defer workers.Done()
-			if runtime.GOOS == "linux" && filepath.Clean(cfg.runtimeDir) == filepath.Dir(historyCommandBinaryPath) && cfg.History != nil && cfg.History.Enabled && cfg.History.Path == "/var/log/history.log" {
+			if runtime.GOOS == "linux" && filepath.Clean(cfg.runtimeDir) == filepath.Dir(historyCommandBinaryPath) && cfg.History != nil && cfg.History.Enabled {
 				if err := serveHistoryCommands(workerCtx, cfg, writer); err != nil && workerCtx.Err() == nil {
 					_ = writeLog(cfg, writer, time.Now(), "history_error", map[string]string{"path": cfg.History.Path, "error": err.Error()})
 				}

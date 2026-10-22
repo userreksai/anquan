@@ -64,6 +64,7 @@ _fixture_foreign=%s
 _fixture_audit=%s
 %s
 . "$_fixture_audit"
+_fixture_source_status=$?
 printf '%%s\n' profile-ran >> "$_fixture_trace"
 %s
 :
@@ -152,22 +153,50 @@ _fixture_second() { local previous=$?; printf 'second:%s\n' "$previous" >> "$_fi
 	}
 }
 
-func TestManagedHistoryBashPreservesForeignAndReadonlyHooks(t *testing.T) {
+func TestManagedHistoryBashReplacesForeignDebugTraps(t *testing.T) {
 	const foreign = `trap 'printf "%s\n" "$BASH_COMMAND" >> "$_fixture_foreign"' DEBUG`
 	for _, tc := range []struct{ name, before, after string }{
 		{"foreign-before", foreign, ""}, {"foreign-after", "", foreign},
-		{"readonly", `readonly PROMPT_COMMAND=':'`, ""},
-		{"unsupported", `declare -A PROMPT_COMMAND=([hook]=':')`, ""},
+		{"prompt-callback", "PROMPT_COMMAND=" + historyPromptShellQuote(foreign), ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			result := runManagedHistoryBash(t, tc.before, tc.after, "true\nexit 0\n", 0, true)
-			if len(result.commands) != 0 {
-				t.Fatalf("existing hook was overwritten: %q\n%s", result.commands, result.output)
-			}
-			if strings.HasPrefix(tc.name, "foreign") && !slices.Contains(result.foreign, "true") {
-				t.Fatalf("foreign DEBUG trap was lost: %q\n%s", result.foreign, result.output)
+			for _, command := range []string{"true", "exit 0"} {
+				requireHistoryPromptCommandCount(t, result, command, 1)
+				if slices.Contains(result.foreign, command) {
+					t.Fatalf("foreign DEBUG trap still owns user commands: %q\n%s", result.foreign, result.output)
+				}
 			}
 		})
+	}
+}
+
+func TestManagedHistoryBashNormalizesIncompatiblePromptAttributes(t *testing.T) {
+	for _, setup := range []string{
+		`declare -A PROMPT_COMMAND=([hook]=':')`,
+		`declare -i PROMPT_COMMAND=23`,
+		`_fixture_original_prompt=':'; declare -n PROMPT_COMMAND=_fixture_original_prompt`,
+		`declare -l PROMPT_COMMAND=':'`,
+		`declare -u PROMPT_COMMAND=':'`,
+	} {
+		t.Run(setup, func(t *testing.T) {
+			result := runManagedHistoryBash(t, setup, "", "false\nprintf 'status:%s\\n' \"$?\" >> \"$_fixture_trace\"\nexit 0\n", 0, true)
+			if !slices.Equal(result.trace, []string{"profile-ran", "status:1"}) {
+				t.Fatalf("prompt normalization changed command status: %q\n%s", result.trace, result.output)
+			}
+			for _, command := range []string{"false", "exit 0"} {
+				requireHistoryPromptCommandCount(t, result, command, 1)
+			}
+		})
+	}
+}
+
+func TestManagedHistoryBashReportsReadonlyPromptFailure(t *testing.T) {
+	const after = `printf 'source-status:%s installed:%s failed:%s\n' "$_fixture_source_status" "${_ANQUAN_MANAGED_HISTORY_PROMPT_INSTALLED-0}" "${_ANQUAN_HISTORY_INSTALL_FAILED-0}" >> "$_fixture_trace"`
+	result := runManagedHistoryBash(t, `readonly PROMPT_COMMAND=':'`, after, "true\nexit 0\n", 0, true)
+	if len(result.commands) != 0 || !strings.Contains(result.output, "ERROR: readonly PROMPT_COMMAND prevents the mandatory command hook") ||
+		!slices.Equal(result.trace, []string{"profile-ran", "source-status:1 installed:0 failed:1"}) {
+		t.Fatalf("readonly prompt failure was not explicit: commands %q trace %q\n%s", result.commands, result.trace, result.output)
 	}
 }
 
