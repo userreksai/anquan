@@ -29,7 +29,19 @@ func ensureHistoryCommandLog(path string) (bool, error) {
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 			return false, fmt.Errorf("command log must be a regular file without symlinks")
 		}
-		return false, nil
+		f, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0)
+		if err != nil {
+			return false, err
+		}
+		defer f.Close()
+		opened, err := f.Stat()
+		if err != nil || !os.SameFile(info, opened) {
+			return false, fmt.Errorf("command log changed before normalization")
+		}
+		if err := f.Chmod(0644); err != nil {
+			return false, err
+		}
+		return false, f.Sync()
 	} else if !os.IsNotExist(err) {
 		return false, err
 	}

@@ -229,8 +229,8 @@ func TestHistoryCommandRootLogSafety(t *testing.T) {
 		t.Fatalf("existing log not retained: %v %v", created, err)
 	}
 	info, _ := os.Stat(path)
-	if info.Mode().Perm() != 0600 {
-		t.Fatal("existing permissions changed")
+	if err := validHistoryCommandLog(info); err != nil {
+		t.Fatalf("existing log was not normalized: %v", err)
 	}
 	data, _ := os.ReadFile(path)
 	if string(data) != "preserved\n" {
@@ -240,19 +240,23 @@ func TestHistoryCommandRootLogSafety(t *testing.T) {
 		if err := os.Chmod(path, mode); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := ensureHistoryCommandLog(path); err == nil {
-			t.Fatalf("group or world-writable log accepted: %o", mode)
+		if created, err := ensureHistoryCommandLog(path); err != nil || created {
+			t.Fatalf("group or world-writable log was not normalized: mode=%o created=%v err=%v", mode, created, err)
 		}
-		if err := appendHistoryCommand(context.Background(), path, []byte("bad\n")); err == nil {
-			t.Fatal("writer accepted unsafe log")
+		info, _ := os.Lstat(path)
+		if err := validHistoryCommandLog(info); err != nil || read(t, path) != "preserved\n" {
+			t.Fatalf("normalization changed retained content or left unsafe metadata: %v", err)
 		}
 	}
 	_ = os.Chmod(path, 0644)
 	_ = os.Chown(path, 65534, 65534)
-	if _, err := ensureHistoryCommandLog(path); err == nil {
-		t.Fatal("non-root log accepted")
+	if _, err := ensureHistoryCommandLog(path); err != nil {
+		t.Fatalf("non-root log was not reclaimed: %v", err)
 	}
-	_ = os.Chown(path, 0, 0)
+	info, _ = os.Lstat(path)
+	if err := validHistoryCommandLog(info); err != nil || read(t, path) != "preserved\n" {
+		t.Fatalf("reclaimed log metadata or retained content incorrect: %v", err)
+	}
 	hardLink := filepath.Join(dir, "hard.log")
 	if err := os.Link(path, hardLink); err != nil {
 		t.Fatal(err)
@@ -394,9 +398,56 @@ func TestHistoryCommandRootConcurrentAppend(t *testing.T) {
 	}
 }
 
+func TestHistoryCommandRootNormalizesDriftAndSeparatesPartialLegacyTail(t *testing.T) {
+	dir := historyCommandRootTestDir(t)
+	path := filepath.Join(dir, "history.log")
+	const retained = "legacy history without a final newline"
+	if err := os.WriteFile(path, []byte(retained), 0644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel, done := startHistoryCommandTestService(t, dir, path)
+	defer stopHistoryCommandTestService(t, cancel, done)
+	// A legacy writer may change metadata after initialization. The next root
+	// append must enforce the managed metadata again without replacing the inode.
+	if err := os.Chown(path, 65534, 65534); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0666); err != nil {
+		t.Fatal(err)
+	}
+	if err := RequestHistoryCommand(context.Background(), dir, "printf 'first\\nsecond'"); err != nil {
+		t.Fatal(err)
+	}
+	if err := RequestHistoryCommand(context.Background(), dir, "echo next"); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil || !os.SameFile(before, after) {
+		t.Fatalf("normalization replaced the retained source inode: %v", err)
+	}
+	if err := validHistoryCommandLog(after); err != nil {
+		t.Fatalf("append did not normalize metadata drift: %v", err)
+	}
+	data := read(t, path)
+	lines := strings.Split(strings.TrimSuffix(data, "\n"), "\n")
+	if len(lines) != 3 || lines[0] != retained {
+		t.Fatalf("old bytes were changed or new record joined the partial tail: %q", data)
+	}
+	for i, command := range []string{"printf 'first\\nsecond'", "echo next"} {
+		record, err := parseHistoryLine(lines[i+1], path, "test", 0, time.UTC)
+		if err != nil || record.Command != command {
+			t.Fatalf("new record is not independently parseable: %+v %v", record, err)
+		}
+	}
+}
+
 func TestHistoryCommandRootPreflight(t *testing.T) {
 	dir := historyCommandRootTestDir(t)
-	c := Config{History: &HistoryConfig{Enabled: true, Path: "/var/log/history.log"}, runtimeDir: dir}
+	c := Config{History: &HistoryConfig{Enabled: true, Path: filepath.Join(dir, "custom-history.log")}, runtimeDir: dir}
 	if err := preflightHistoryCommands(c); err != nil {
 		t.Fatalf("fresh socket preflight: %v", err)
 	}
@@ -431,7 +482,7 @@ func TestHistoryCommandRootPreflight(t *testing.T) {
 func TestHistoryCommandDisabledAndTerminal(t *testing.T) {
 	for _, history := range []*HistoryConfig{nil, {}, {Enabled: true, Path: "/custom/history.log"}} {
 		if err := serveHistoryCommands(context.Background(), Config{History: history}, nil); err != nil {
-			t.Fatalf("disabled or custom-path history started a writer: %v", err)
+			t.Fatalf("disabled or nonstandard-runtime history started a writer: %v", err)
 		}
 	}
 	for _, terminal := range []string{"/dev/pts/0", "/dev/pts/12345"} {

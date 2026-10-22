@@ -51,7 +51,7 @@ func TestEnsureHistoryScriptInstallsMissingAndPreservesLog(t *testing.T) {
 		t.Fatalf("installation changed existing log: %q %v", got, err)
 	}
 	before := info.ModTime()
-	installed, err = ensureHistoryScriptAt(script, log, "/different binary")
+	installed, err = ensureHistoryScriptAt(script, log, "/usr/local/agent with space/anquan")
 	if err != nil || installed {
 		t.Fatalf("repeated installation replaced existing hook: %v %v", installed, err)
 	}
@@ -65,7 +65,7 @@ func TestEnsureHistoryScriptInstallsMissingAndPreservesLog(t *testing.T) {
 	}
 }
 
-func TestEnsureHistoryScriptPreservesCustomWriterAndState(t *testing.T) {
+func TestEnsureHistoryScriptReplacesCustomWriterAndPreservesState(t *testing.T) {
 	dir := historyManagedInstallDir(t)
 	c := historyTestConfig(t)
 	c.History.Path = filepath.Join(dir, "history.log")
@@ -80,8 +80,19 @@ func TestEnsureHistoryScriptPreservesCustomWriterAndState(t *testing.T) {
 	if err := initializeHistoryManagedAt(c, nil, script, c.History.Path, "/usr/local/anquan/anquan"); err != nil {
 		t.Fatal(err)
 	}
-	if read(t, script) != custom || read(t, c.StateFile+".commands") != before || read(t, c.History.Path) != historyLine("already collected") {
-		t.Fatal("custom hook installation changed script, retained log or command cursor")
+	if read(t, script) != string(managedHistoryScript(historyCommandBinaryPath)) || read(t, c.StateFile+".commands") != before || read(t, c.History.Path) != historyLine("already collected") {
+		t.Fatal("custom writer was not replaced without changing the retained log or command cursor")
+	}
+	backups, err := filepath.Glob(filepath.Join(dir, ".history-audit.sh.anquan-before-managed-*"))
+	if err != nil || len(backups) != 1 || read(t, backups[0]) != custom {
+		t.Fatalf("original custom writer was not backed up: %v %v", backups, err)
+	}
+	if err := initializeHistoryManagedAt(c, nil, script, c.History.Path, historyCommandBinaryPath); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := filepath.Glob(filepath.Join(dir, ".history-audit.sh.anquan-before-managed-*"))
+	if len(again) != 1 {
+		t.Fatalf("unchanged hook was backed up again: %v", again)
 	}
 	if readHistoryRecoveryState(t, c).ScriptRepair != nil || len(historyRecoveryArchives(t, c)) != 0 {
 		t.Fatal("custom/missing script installation authorized history replay")
@@ -97,7 +108,7 @@ func TestEnsureHistoryScriptPreservesCustomWriterAndState(t *testing.T) {
 	}
 }
 
-func TestEnsureHistoryScriptPreservesExternalLogPermissions(t *testing.T) {
+func TestEnsureHistoryScriptNormalizesExternalLogPermissions(t *testing.T) {
 	dir := historyManagedInstallDir(t)
 	script, log := filepath.Join(dir, "history-audit.sh"), filepath.Join(dir, "history.log")
 	if err := os.WriteFile(script, []byte("# administrator-owned external writer\n"), 0644); err != nil {
@@ -114,12 +125,32 @@ func TestEnsureHistoryScriptPreservesExternalLogPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	installed, err := ensureHistoryScriptAt(script, log, historyCommandBinaryPath)
-	if err != nil || installed || isManagedHistoryScript(script) {
-		t.Fatalf("external writer was converted to managed logging: %t %v", installed, err)
+	if err != nil || !installed || !isManagedHistoryScript(script) {
+		t.Fatalf("external writer was not converted to managed logging: %t %v", installed, err)
 	}
 	after, err := os.Stat(log)
-	if err != nil || after.Mode() != before.Mode() || !after.ModTime().Equal(before.ModTime()) || read(t, log) != "existing external record\n" {
-		t.Fatalf("external log changed: %v", err)
+	if err != nil || !os.SameFile(before, after) || !after.ModTime().Equal(before.ModTime()) || read(t, log) != "existing external record\n" {
+		t.Fatalf("normalization changed the existing log identity or contents: %v", err)
+	}
+	if runtime.GOOS != "windows" && after.Mode().Perm() != 0644 {
+		t.Fatalf("external log permissions were not normalized: %v", after.Mode())
+	}
+}
+
+func TestEnsureHistoryScriptRepairsTamperedManagedWriter(t *testing.T) {
+	dir := historyManagedInstallDir(t)
+	script, log := filepath.Join(dir, "history-audit.sh"), filepath.Join(dir, "history.log")
+	tampered := managedHistoryScriptMarker + "echo incompatible > /var/log/history.log\n"
+	put(t, script, tampered)
+	if changed, err := ensureHistoryScriptAt(script, log, historyCommandBinaryPath); err != nil || !changed {
+		t.Fatalf("managed marker bypassed content validation: changed=%v err=%v", changed, err)
+	}
+	if read(t, script) != string(managedHistoryScript(historyCommandBinaryPath)) {
+		t.Fatal("tampered writer was not restored to the current Agent format")
+	}
+	backups, _ := filepath.Glob(filepath.Join(dir, ".history-audit.sh.anquan-before-managed-*"))
+	if len(backups) != 1 || read(t, backups[0]) != tampered {
+		t.Fatal("tampered writer was replaced without retaining its original")
 	}
 }
 

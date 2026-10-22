@@ -101,12 +101,15 @@ login:
   # wtmp：改 source 为 wtmp，path 填 /var/log/wtmp，可添加 last_command: last。
   # 要关闭成功登录采集，设置 enabled: false；直接省略 login 会默认开启。
 
-# 操作命令采集默认关闭。v0.7.4 标准 Linux 安装启用默认路径后自动补齐缺失脚本和日志。
+# 操作命令采集默认关闭。标准 Linux 安装启用后统一为 Agent 命令脚本；不自动开启。
+# 已有自定义/旧脚本不一致时先备份再原子替换；日志root:root 0644，保留内容和游标。
+# 标准安装也支持自定义path；自定义部署目录仍需外部记录机制。仅采集接入钩子的交互Bash。
+# 受管钩子接管其他DEBUG trap，规范可修改的PROMPT_COMMAND属性；只读限制会明确报错。
 # 开启条件：server 非空、Master 支持 ACK；已有 SSH 会话需重新登录加载新脚本。
 history:
   enabled: false
   path: /var/log/history.log
-  timezone: Local          # 按日志生产脚本使用的节点时区解释时间。
+  timezone: Local          # 受管服务按此时区写入并解释；外部记录脚本须使用相同时区。
   poll_interval_ms: 1000    # 追平后每秒检查，单位毫秒，允许 100–60000。
   max_records: 100          # 每批最多处理 1–1000 个物理行，空行也计数。
 # 首次从文件头连续分批补传；已有游标时改 path/timezone 须处理来源迁移。

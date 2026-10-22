@@ -282,7 +282,7 @@ JSONL 示例：
 
 配套 Master 同时支持 SSH 登录通知：每条新入库的 `ssh_login` 自动发送到已启用的通知地址，包含机器、用户、来源 IP、终端、认证方式和真实登录时间；重复上报不重复入队，发送失败持久重试，数据库已有历史记录不补发。
 
-在管理端 YAML 中加入以下配置并下发，或重新加密生成 `config.age` 后重启 Agent。标准 Linux 安装从 v0.7.4 起会为默认日志路径补装缺失的命令脚本；自定义日志路径仍由已有记录机制提供数据。需要先升级支持命令入库确认的 Master 和 Web。
+在管理端 YAML 中加入以下配置并下发，或重新加密生成 `config.age` 后重启 Agent。标准 Linux 安装会按 Agent 标准初始化命令脚本，默认及自定义 `history.path` 均由 root 服务写入；自定义部署目录仍使用已有外部记录机制。需要先升级支持命令入库确认的 Master 和 Web。
 
 ```yaml
 history:
@@ -293,15 +293,15 @@ history:
   max_records: 100
 ```
 
-同时填写 `server` 主控地址并以 `-service` 常驻运行。省略 `history` 或设置 `enabled: false` 可关闭采集。`timezone: Local` 按 Agent 主机本地时区解释日志中的时间，与脚本 `date` 一致；也可指定 `Asia/Shanghai` 等 IANA 时区。Web 按浏览器时区展示发生时间，保留独立的接收时间。
+同时填写 `server` 主控地址并以 `-service` 常驻运行。省略 `history` 或设置 `enabled: false` 可关闭采集，不会因已有脚本而自动开启。`timezone: Local` 按 Agent 主机本地时区写入并解释日志时间；也可指定 `Asia/Shanghai` 等 IANA 时区。外部记录脚本的时间须与此配置一致。Web 按浏览器时区展示发生时间，保留独立的接收时间。
 
 启用 v0.7.0 安全组件时仍需保留这段顶层 `history` 配置。Tetragon、auditd、sudo 上报的是“安全运行事件”，不会替代“操作命令”；安全运行事件的级别过滤和 Tetragon 屏蔽也不影响 `command_history`。旧版安全组件示例曾省略 `history`，整份替换后会关闭命令采集。恢复时沿用原来的 `history.path` 和 `history.timezone`，保留 `.commands` 游标及待发数据。
 
-Linux 上启用 `history` 且使用默认源 `/var/log/history.log` 时，服务启动和配置热更新会初始化记录链路。在固定安装目录 `/usr/local/anquan`，缺失的脚本以 0644 完整原子创建，缺失日志以 root:root 0644 创建；已有文件不截断，已有自定义脚本不覆盖。已存在的已知旧脚本仍先备份到 `/etc/profile.d/.history-audit.sh.anquan-before-append-*`，再修复 `200>` 截断问题并延迟交互钩子至首次提示符。自定义部署目录保留原来的外部日志读取与既有脚本修复方式，不安装指向另一目录的全局钩子。
+Linux 标准安装 `/usr/local/anquan/anquan` 明确启用 `history` 后，服务启动和配置热更新会初始化记录链路。脚本缺失时以 root:root 0644 完整原子创建，已有自定义或旧受管脚本与当前标准不一致时先备份再原子替换；相同脚本不反复备份。日志使用配置中的 `history.path`，缺失时创建，已有普通文件的属主和权限规范为 root:root 0644，不截断或改写内容；旧尾部缺少换行时，追加换行后再写新记录。已知 `200>` 旧脚本先备份修复再转换为当前受管脚本，仅默认日志源可为本次修复生成恢复凭证；仅更换脚本不重置 `.commands` 游标，原 `path`、`timezone` 仍受来源一致性校验保护。符号链接、特殊文件、不安全目录、与 Agent 配置或状态重叠的路径和无法规范的权限会明确报错。自定义部署目录保留外部日志读取与既有脚本修复方式，不安装全局受管钩子。
 
-新受管脚本仅记录交互 Bash，保留字符串或索引数组 `PROMPT_COMMAND`，提示符执行期间暂停记录，重复加载不叠加；已有其他 DEBUG trap、只读等不支持的提示符属性会保留并给出提示。命令通过固定程序的 `-record-command` stdin 传入 `/run/anquan/.history-command/agent.sock`，不进入进程参数；服务根据内核 UID 确定用户，并按 `history.timezone` 写入时间。命令中的换行转义为单行文本。日志不向普通用户开放写权限，命令入口独立于 `login.enabled` 与登录采集模式；关闭 history 或服务后脚本不再提交。Shell、脚本和用户自身可改变钩子，本功能不是防管理员绕过的强制审计。
+受管脚本仅记录交互 Bash，在首次提示符处以 Agent 的 DEBUG trap 接管已有 DEBUG trap，保留可用的提示符命令并规范可修改的 `PROMPT_COMMAND` 属性；提示符执行期间暂停记录，重复加载不叠加。只读等无法在当前 Shell 解除的限制会输出错误并使脚本加载返回非零，需修正 Shell 启动配置后重新登录。命令通过固定程序的 `-record-command` stdin 传入 `/run/anquan/.history-command/agent.sock`，不进入进程参数；服务根据内核 UID 确定用户，并按 `history.timezone` 写入时间。命令中的换行转义为单行文本。日志不向普通用户开放写权限，命令入口独立于 `login.enabled` 与登录采集模式；关闭 history 或服务后脚本不再提交。接管范围是已加载该脚本的交互 Bash，Shell、其他启动脚本和用户仍可改变钩子；不覆盖所有 Shell、非交互任务或任意系统调用。
 
-新钩子需要退出 SSH 后重新登录。配置成功应用后检查 `/etc/profile.d/history-audit.sh`，服务日志应出现 `history_script_installed`（首次创建）和 `history_command_ready`。在新会话执行 `echo ANQUAN_CMD_PROBE`，再查看 `/var/log/history.log` 和页面记录。安装成功提示中的“SSH login hook ready”只指登录上报钩子，命令钩子由启用的 history 配置初始化。旧自定义脚本继续使用自身的写入和非交互行为；此前没有生成或已丢失的命令不能补获。
+新钩子需要退出 SSH 后重新登录。配置成功应用后检查 `/etc/profile.d/history-audit.sh`；首次创建记录 `history_script_installed`，替换已有脚本记录 `history_script_replaced` 并带备份路径，命令服务就绪记录 `history_command_ready`。在新会话执行 `echo ANQUAN_CMD_PROBE`，再查看配置中的 `history.path` 和页面记录。安装成功提示中的“SSH login hook ready”只指登录上报钩子，命令钩子由启用的 history 配置初始化。此前没有生成或已丢失的命令不能补获；原自定义脚本的额外功能需从备份中另行迁移，不能继续依赖已被替换的入口。
 
 首次从文件开头分批补传全部已有记录，每批最多 `max_records` 条（默认 100，允许 1–1000），有积压时连续读取。追平后默认每秒检查追加内容，独立于文件巡检周期和耗时。只从已保存的字节位置继续，内存与单批数据量相关，不随整个日志大小增长；文件末尾尚未写完的一行等待换行后再处理。`-scan` 单次巡检只处理一批；持续实时采集使用 `-service`，SSH 执行上报入口不处理命令积压。
 
