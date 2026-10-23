@@ -16,10 +16,13 @@ import (
 )
 
 type fakeRunner struct {
-	calls   []string
-	values  map[string]string
-	fail    func(string, []string) error
-	missing map[string]bool
+	calls       []string
+	values      map[string]string
+	fail        func(string, []string) error
+	missing     map[string]bool
+	rootDir     string
+	cadState    string
+	burstAction string
 }
 
 func (r *fakeRunner) LookPath(n string) (string, error) {
@@ -54,15 +57,41 @@ func (r *fakeRunner) Run(ctx context.Context, n string, args ...string) (string,
 	if n == "sshd" && len(args) > 0 && args[0] == "-T" {
 		return "port 2222\npasswordauthentication no\nkbdinteractiveauthentication no\npermitrootlogin no\nallowusers deploy\n", nil
 	}
-	if n == "systemctl" && len(args) > 0 && args[0] == "is-enabled" {
-		return "static", nil
+	if n == "systemctl" && len(args) > 0 {
+		switch args[0] {
+		case "is-enabled":
+			if len(args) > 1 && args[1] == "ctrl-alt-del.target" && r.cadState != "" {
+				return r.cadState, nil
+			}
+			return "static", nil
+		case "show":
+			if len(args) > 1 && args[1] == "--property=CtrlAltDelBurstAction" {
+				if r.burstAction == "" {
+					return "reboot-force", nil
+				}
+				return r.burstAction, nil
+			}
+		case "mask":
+			r.cadState = "masked"
+			if len(args) > 1 && args[1] == "--runtime" {
+				r.cadState = "masked-runtime"
+			}
+		case "unmask":
+			r.cadState = "static"
+		case "daemon-reexec":
+			data, _ := os.ReadFile(filepath.Join(r.rootDir, filepath.FromSlash(strings.TrimPrefix(ctrlAltDelConfigPath, "/"))))
+			r.burstAction = "reboot-force"
+			if strings.Contains(string(data), "CtrlAltDelBurstAction=none") {
+				r.burstAction = "none"
+			}
+		}
 	}
 	return "", nil
 }
 func testManager(t *testing.T, c Config) (*Manager, *fakeRunner) {
 	t.Helper()
 	root := t.TempDir()
-	runner := &fakeRunner{values: map[string]string{}, missing: map[string]bool{}}
+	runner := &fakeRunner{values: map[string]string{}, missing: map[string]bool{}, rootDir: root}
 	m := NewManager(c, filepath.Join(root, "state"))
 	m.RootDir = root
 	m.Runner = runner
@@ -329,7 +358,8 @@ func TestArchiveRejectsTraversalAndLinks(t *testing.T) {
 	}
 }
 func TestFirewallUsesActualSSHPortAndOwnTable(t *testing.T) {
-	m, _ := testManager(t, Config{})
+	m, runner := testManager(t, Config{})
+	sshHost(t, m, runner)
 	raw, err := m.firewallRules(context.Background(), []string{"10.0.0.0/8", "2001:db8::/32"})
 	if err != nil {
 		t.Fatal(err)

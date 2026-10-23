@@ -37,7 +37,7 @@ func componentStatusFingerprint(data map[string]any) (string, error) {
 	projected := make([]map[string]any, 0, len(components))
 	for _, component := range components {
 		fields := map[string]any{}
-		for _, key := range []string{"name", "enabled", "installed", "running", "state", "message", "error", "version", "config_hash", "checks", "omitted_checks"} {
+		for _, key := range []string{"name", "enabled", "installed", "running", "state", "message", "error", "version", "config_hash", "policy_mode", "checks", "omitted_checks"} {
 			if value, ok := component[key]; ok {
 				fields[key] = value
 			}

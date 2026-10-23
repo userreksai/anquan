@@ -6,21 +6,11 @@ import (
 	"testing"
 )
 
-type sshSettingsRunner struct {
-	Runner
-	settings string
-}
-
-func (r sshSettingsRunner) Run(ctx context.Context, name string, args ...string) (string, error) {
-	if name == "sshd" && len(args) == 1 && args[0] == "-T" {
-		return r.settings, nil
-	}
-	return r.Runner.Run(ctx, name, args...)
-}
-
 func TestFirewallRestrictsEveryConfiguredSSHPort(t *testing.T) {
-	m, _ := testManager(t, Config{})
-	m.Runner = sshSettingsRunner{Runner: m.Runner, settings: "port 22\nport 2222\nport 2200\n"}
+	m, base := testManager(t, Config{})
+	runner := sshHost(t, m, base)
+	runner.settings = "port 22\nport 2222\nport 2200\n"
+	runner.listeners = "LISTEN 0 128 0.0.0.0:22 0.0.0.0:* users:((\"sshd\",pid=4242,fd=3))\nLISTEN 0 128 0.0.0.0:2222 0.0.0.0:* users:((\"sshd\",pid=4242,fd=4))\nLISTEN 0 128 [::]:2200 [::]:* users:((\"sshd\",pid=4242,fd=5))"
 	rules, err := m.firewallRules(context.Background(), []string{"192.0.2.0/24", "2001:db8::/32"})
 	if err != nil {
 		t.Fatal(err)

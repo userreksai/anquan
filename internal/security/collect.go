@@ -131,6 +131,13 @@ func (m *Manager) Poll(ctx context.Context, emit func(Event) error) error {
 			}
 		}
 	}
+	// Host probes can spawn sshd/sudo/Bash. Keep their cadence independent from
+	// the short log ingestion poll so hardening does not stall event collection.
+	now := time.Now()
+	policyConfigHash := configHash(m.Config)
+	if m.lastPolicyConfigHash == policyConfigHash && !m.lastPolicyPoll.IsZero() && now.Sub(m.lastPolicyPoll) >= 0 && now.Sub(m.lastPolicyPoll) < time.Duration(m.Config.StatusIntervalSeconds)*time.Second {
+		return writePrivateJSON(m.statePath(), "security-collector", s)
+	}
 	checks := m.checkPolicies(ctx)
 	raw, _ := json.Marshal(checks)
 	digest := hashString(string(raw))
@@ -146,7 +153,11 @@ func (m *Manager) Poll(ctx context.Context, emit func(Event) error) error {
 		}
 		s.PolicyHash = digest
 	}
-	return writePrivateJSON(m.statePath(), "security-collector", s)
+	if err := writePrivateJSON(m.statePath(), "security-collector", s); err != nil {
+		return err
+	}
+	m.lastPolicyPoll, m.lastPolicyConfigHash = now, policyConfigHash
+	return nil
 }
 func (m *Manager) collectLog(ctx context.Context, s *collectorState, path, source string, lineFn func(string, string) error, emit func(Event) error) error {
 	oversizeFn := func(key string, bytes int64) error {

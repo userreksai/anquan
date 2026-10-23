@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"path"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"go.yaml.in/yaml/v3"
@@ -45,6 +46,7 @@ type SudoConfig struct {
 	UploadIO        bool        `json:"upload_io" yaml:"upload_io"`
 	MaxSessionBytes int         `json:"max_session_bytes" yaml:"max_session_bytes"`
 	Grants          []SudoGrant `json:"grants" yaml:"grants"`
+	RestrictUsers   []string    `json:"restrict_users" yaml:"restrict_users"`
 }
 type SudoGrant struct {
 	User     string   `json:"user" yaml:"user"`
@@ -66,10 +68,13 @@ type SSHConfig struct {
 	PermitRootLogin        string   `json:"permit_root_login" yaml:"permit_root_login"`
 	AllowUsers             []string `json:"allow_users" yaml:"allow_users"`
 	AllowSources           []string `json:"allow_sources" yaml:"allow_sources"`
+	DisableForwarding      bool     `json:"disable_forwarding" yaml:"disable_forwarding"`
+	StrongCrypto           bool     `json:"strong_crypto" yaml:"strong_crypto"`
 }
 type GRUBConfig struct {
-	Enabled      bool   `json:"enabled" yaml:"enabled"`
-	PasswordHash string `json:"password_hash" yaml:"password_hash"`
+	Enabled           bool   `json:"enabled" yaml:"enabled"`
+	PasswordHash      string `json:"password_hash" yaml:"password_hash"`
+	ProtectSingleUser bool   `json:"protect_single_user" yaml:"protect_single_user"`
 }
 
 func (c *Config) Normalize() {
@@ -117,6 +122,16 @@ func (c Config) Validate() error {
 	}
 	if len(c.Sudo.Grants) > 128 {
 		return fmt.Errorf("too many sudo grants")
+	}
+	if len(c.Sudo.RestrictUsers) > 128 {
+		return fmt.Errorf("sudo.restrict_users exceeds 128 accounts")
+	}
+	seenRestricted := map[string]bool{}
+	for _, user := range c.Sudo.RestrictUsers {
+		if user == "root" || user == "ALL" || !userPattern.MatchString(user) || seenRestricted[user] {
+			return fmt.Errorf("sudo.restrict_users must contain unique local accounts other than root/ALL")
+		}
+		seenRestricted[user] = true
 	}
 	for _, g := range c.Sudo.Grants {
 		if g.User == "ALL" || g.RunAs == "ALL" {
@@ -171,6 +186,12 @@ func (c Config) Validate() error {
 		if !sysctlPattern.MatchString(k) || strings.ContainsAny(v, "\r\n\x00") || len(v) > 128 || strings.TrimSpace(v) == "" {
 			return fmt.Errorf("invalid sysctl setting %q", k)
 		}
+		if limit, known := map[string]int{"kernel.dmesg_restrict": 1, "kernel.kptr_restrict": 2, "net.ipv4.conf.all.rp_filter": 2, "net.ipv4.tcp_syncookies": 2}[k]; known {
+			n, err := strconv.Atoi(v)
+			if err != nil || n < 0 || n > limit || strconv.Itoa(n) != v {
+				return fmt.Errorf("sysctl %s must be an integer 0..%d", k, limit)
+			}
+		}
 	}
 	s := c.Policies.SSH
 	if s.PasswordAuthentication != "" && s.PasswordAuthentication != "yes" && s.PasswordAuthentication != "no" {
@@ -191,8 +212,11 @@ func (c Config) Validate() error {
 			}
 		}
 	}
-	if c.Policies.GRUB.Enabled && c.Policies.Mode == "enforce" && !regexp.MustCompile(`^grub\.pbkdf2\.sha512\.[0-9]+\.[A-Fa-f0-9]+\.[A-Fa-f0-9]+$`).MatchString(c.Policies.GRUB.PasswordHash) {
+	if c.Policies.GRUB.Enabled && c.Policies.Mode == "enforce" && !validGRUBPasswordHash(c.Policies.GRUB.PasswordHash) {
 		return fmt.Errorf("GRUB enforcement requires a grub.pbkdf2.sha512 hash from grub-mkpasswd-pbkdf2")
+	}
+	if c.Policies.GRUB.ProtectSingleUser && !c.Policies.GRUB.Enabled {
+		return fmt.Errorf("grub.protect_single_user requires grub.enabled and a boot authentication policy")
 	}
 	t := c.Tetragon
 	if t.Version != "" && !versionPattern.MatchString(t.Version) {
@@ -230,6 +254,30 @@ func (c Config) Validate() error {
 	}
 	return nil
 }
+
+func validGRUBPasswordHash(hash string) bool {
+	if len(hash) > 4096 {
+		return false
+	}
+	parts := strings.Split(hash, ".")
+	if len(parts) != 6 || parts[0] != "grub" || parts[1] != "pbkdf2" || parts[2] != "sha512" {
+		return false
+	}
+	iterations, err := strconv.ParseUint(parts[3], 10, 32)
+	if err != nil || iterations == 0 || strconv.FormatUint(iterations, 10) != parts[3] {
+		return false
+	}
+	for _, text := range parts[4:] {
+		if text == "" {
+			return false
+		}
+		if _, err := hex.DecodeString(text); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
 func tetragonOptions(raw string) (map[string]string, error) {
 	var values map[string]any
 	if err := yaml.Unmarshal([]byte(raw), &values); err != nil {

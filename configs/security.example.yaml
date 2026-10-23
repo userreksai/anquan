@@ -94,7 +94,8 @@ security:
     io_logging: true
     upload_io: false             # 需要平台下载录制文件时开启
     max_session_bytes: 20971520  # 每会话20MiB上传上限
-    grants: []                  # 仅enforce应用；不撤销其他sudoers里的广泛授权
+    restrict_users: []          # enforce时收回这些账户的广泛sudo权限，仅保留下面显式grants
+    grants: []                  # 未列入restrict_users的账户仍是增量授权
     # grants:
     #   - user: ubuntu
     #     run_as: root
@@ -121,9 +122,17 @@ security:
       permit_root_login: prohibit-password
       allow_users: []
       allow_sources: []
+      disable_forwarding: false
+      strong_crypto: false
     sysctl: {}
+    # 四个前端开关默认关闭；开启后对应映射为以下值，关闭则删除对应key：
+    # kernel.dmesg_restrict: "1"
+    # kernel.kptr_restrict: "2"
+    # net.ipv4.conf.all.rp_filter: "1"  # 严格反向路径校验；非对称路由/VPN先测试
+    # net.ipv4.tcp_syncookies: "1"
     session_timeout_seconds: 0
     disable_ctrl_alt_del: false
     grub:
       enabled: false
       password_hash: ""
+      protect_single_user: false

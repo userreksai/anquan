@@ -35,7 +35,9 @@ type manifest struct {
 	SysctlOriginal             map[string]string `json:"sysctl_original,omitempty"`
 	CtrlAltDelMasked           bool              `json:"ctrl_alt_del_masked"`
 	CtrlAltDelOriginallyMasked bool              `json:"ctrl_alt_del_originally_masked"`
+	CtrlAltDelOriginalState    string            `json:"ctrl_alt_del_original_state,omitempty"`
 	Firewall                   bool              `json:"firewall"`
+	FirewallOriginalUnitState  string            `json:"firewall_original_unit_state,omitempty"`
 	AppliedAt                  *time.Time        `json:"applied_at,omitempty"`
 }
 
@@ -61,18 +63,22 @@ func (m manifest) configuredFiles() map[string]string {
 }
 
 type transactionJournal struct {
-	Before   []snapshot      `json:"before"`
-	Previous manifest        `json:"previous"`
-	Next     manifest        `json:"next"`
-	Dirty    map[string]bool `json:"dirty,omitempty"`
+	Before          []snapshot        `json:"before"`
+	Previous        manifest          `json:"previous"`
+	Next            manifest          `json:"next"`
+	Dirty           map[string]bool   `json:"dirty,omitempty"`
+	RuntimeSysctl   map[string]string `json:"runtime_sysctl,omitempty"`
+	RuntimeCADState *string           `json:"runtime_cad_state,omitempty"`
 }
 type transaction struct {
-	manager  *Manager
-	before   []snapshot
-	touched  map[string]bool
-	previous manifest
-	next     manifest
-	dirty    map[string]bool
+	manager         *Manager
+	before          []snapshot
+	touched         map[string]bool
+	previous        manifest
+	next            manifest
+	dirty           map[string]bool
+	runtimeSysctl   map[string]string
+	runtimeCADState *string
 }
 
 func (m *Manager) journalPath() string {
@@ -144,30 +150,50 @@ func noSymlink(path string) error {
 	}
 	return nil
 }
+
+// capture records a preimage without creating, replacing or deleting the path.
+// Generated boot configuration is captured before invoking update-grub, which
+// writes files outside the ordinary managed-file loop.
+func (t *transaction) capture(p string) error {
+	if t.touched == nil {
+		t.touched = map[string]bool{}
+	}
+	if t.touched[p] {
+		return nil
+	}
+	full := t.manager.path(p)
+	if err := noSymlink(full); err != nil {
+		return err
+	}
+	s := snapshot{Path: p}
+	info, err := os.Lstat(full)
+	if err == nil {
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("refusing to snapshot non-regular configuration: %s", p)
+		}
+		if info.Size() > 8*1024*1024 {
+			return fmt.Errorf("managed file exceeds backup limit: %s", p)
+		}
+		s.Exists = true
+		s.Mode = info.Mode().Perm()
+		s.Data, err = os.ReadFile(full)
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	t.before = append(t.before, s)
+	t.touched[p] = true
+	return nil
+}
 func (t *transaction) change(p string, next *managedFile) error {
 	full := t.manager.path(p)
 	if err := noSymlink(full); err != nil {
 		return err
 	}
 	if !t.touched[p] {
-		s := snapshot{Path: p}
-		info, err := os.Stat(full)
-		if err == nil {
-			if !info.Mode().IsRegular() {
-				return fmt.Errorf("managed file is not regular: %s", p)
-			}
-			if info.Size() > 8*1024*1024 {
-				return fmt.Errorf("managed file exceeds backup limit: %s", p)
-			}
-			s.Exists = true
-			s.Mode = info.Mode().Perm()
-			s.Data, err = os.ReadFile(full)
-		}
-		if err != nil && !os.IsNotExist(err) {
+		if err := t.capture(p); err != nil {
 			return err
 		}
-		t.before = append(t.before, s)
-		t.touched[p] = true
 		if err := t.save(); err != nil {
 			return err
 		}
@@ -187,7 +213,7 @@ func (t *transaction) change(p string, next *managedFile) error {
 	return atomicFile(full, next.Data, next.Mode)
 }
 func (t *transaction) save() error {
-	return writePrivateJSON(t.manager.journalPath(), "security-transaction", transactionJournal{Before: t.before, Previous: t.previous, Next: t.next, Dirty: t.dirty})
+	return writePrivateJSON(t.manager.journalPath(), "security-transaction", transactionJournal{Before: t.before, Previous: t.previous, Next: t.next, Dirty: t.dirty, RuntimeSysctl: t.runtimeSysctl, RuntimeCADState: t.runtimeCADState})
 }
 func (m *Manager) restore(snapshots []snapshot) error {
 	var errs []error

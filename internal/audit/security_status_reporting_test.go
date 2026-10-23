@@ -92,3 +92,26 @@ func TestComponentStatusLongCheckIntervalMatchesSnapshotMetadata(t *testing.T) {
 		t.Fatalf("long check interval produced misleading snapshot freshness: %+v", delivered)
 	}
 }
+
+func TestPolicySampleTimeDoesNotMaskMeaningfulStatusChanges(t *testing.T) {
+	data := map[string]any{"components": []map[string]any{{"name": "policies", "state": "audit", "policy_mode": "audit", "checked_at": "2026-10-23T01:00:00Z", "checks": []map[string]any{{"setting": "sysctl.kernel.dmesg_restrict", "expected": "1", "actual": "1", "compliant": true}}}}}
+	fingerprint, err := componentStatusFingerprint(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	component := data["components"].([]map[string]any)[0]
+	component["checked_at"] = "2026-10-23T01:00:30Z"
+	if actual, _ := componentStatusFingerprint(data); actual != fingerprint {
+		t.Fatal("check timestamp alone created another status event")
+	}
+	component["policy_mode"] = "enforce"
+	if actual, _ := componentStatusFingerprint(data); actual == fingerprint {
+		t.Fatal("policy mode change was hidden")
+	}
+	component["policy_mode"] = "audit"
+	check := component["checks"].([]map[string]any)[0]
+	check["error"] = "permission denied"
+	if actual, _ := componentStatusFingerprint(data); actual == fingerprint {
+		t.Fatal("new inspection error was hidden")
+	}
+}
