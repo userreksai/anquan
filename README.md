@@ -1,4 +1,6 @@
-# Anqu 安全检测 Agent（v0.7.6）
+# Anqu 安全检测 Agent（v0.7.7）
+
+v0.7.7 为已合并的主机加固和命令记录格式兼容修正分配独立发布版本，支持 `sudo.restrict_users`、SSH `disable_forwarding` / `strong_crypto` 和 GRUB `protect_single_user`。旧版 0.7.6 会拒绝这些新字段，统一显示 `master configuration contains invalid YAML`；先将节点升级至 0.7.7，再下发包含新字段的配置。构建程序与 `.update.json` 清单使用同一源码版本，平台可按严格递增版本将旧 0.7.6 升级到 0.7.7。主机策略仍默认仅检查（`audit`），需要实际修改时须显式选择 `enforce`。
 
 v0.7.6 将 Vim 等编辑器同次保存产生的“移走旧文件再重建同路径”归并为一条修改事件，变更前取原基线，变更后取最终采到的版本；不再为这次保存分别发送删除和新增通知。真正的新建后删除、最终删除仍保留各自记录。配套主控可在同一条通知展示前后文本受限预览；平台详情沿用同一事件的前后内容。
 
