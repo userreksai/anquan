@@ -46,7 +46,7 @@ func boundSecurityStatus(data map[string]any, components []map[string]any) {
 		}
 		for _, check := range checks {
 			if fields, ok := check.(map[string]any); ok {
-				for _, key := range []string{"setting", "expected", "actual", "message"} {
+				for _, key := range []string{"setting", "expected", "actual", "message", "error"} {
 					if value, ok := fields[key].(string); ok && len(value) > 512 {
 						fields[key] = boundedSecurityStatusText(value, 512)
 						fields["truncated"] = true
@@ -120,6 +120,10 @@ func applySecurityComponents(ctx context.Context, c Config, writer io.Writer) er
 	manager := security.NewManager(componentConfig(c), securityDataDir(c))
 	manager.DownloadRelay = c.downloadRelay
 	statuses, err := manager.Apply(ctx)
+	return recordSecurityApplyResult(c, writer, statuses, err)
+}
+
+func recordSecurityApplyResult(c Config, writer io.Writer, statuses []security.ComponentStatus, err error) error {
 	if err != nil {
 		_ = writeState(filepath.Join(securityDataDir(c), "apply-error.state"), "security-apply-error", map[string]any{"error": err.Error(), "components": statuses, "attempted_at": time.Now().UTC()})
 		_ = writeLog(c, writer, time.Now(), "security_apply_failed", map[string]any{"error": err.Error(), "components": statuses})
@@ -212,6 +216,9 @@ func securityLoop(ctx context.Context, c Config, writer io.Writer) {
 			_ = applySecurityComponents(ctx, c, writer)
 			manager := security.NewManager(c.Security.Config, securityDataDir(c))
 			manager.DownloadRelay = c.downloadRelay
+			manager.ReconcileResult = func(statuses []security.ComponentStatus, err error) error {
+				return recordSecurityApplyResult(c, writer, statuses, err)
+			}
 			for ctx.Err() == nil {
 				if err := manager.Run(ctx, emit); err != nil && ctx.Err() == nil {
 					_ = writeLog(c, writer, time.Now(), "security_error", map[string]string{"error": err.Error()})

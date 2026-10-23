@@ -3,8 +3,8 @@ package security
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
+	"time"
 )
 
 type PolicyCheck struct {
@@ -13,86 +13,103 @@ type PolicyCheck struct {
 	Actual    string `json:"actual"`
 	Compliant bool   `json:"compliant"`
 	Message   string `json:"message,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
+
+func policyValueCheck(setting, expected, actual string, err error) PolicyCheck {
+	c := PolicyCheck{Setting: setting, Expected: expected, Actual: actual, Compliant: err == nil && normalizePolicyValue(expected) == normalizePolicyValue(actual)}
+	if err != nil {
+		c.Error = err.Error()
+		c.Message = err.Error()
+	}
+	return c
+}
+
+func normalizePolicyValue(value string) string { return strings.Join(strings.Fields(value), " ") }
 
 func (m *Manager) checkPolicies(ctx context.Context) []PolicyCheck {
 	if !m.Config.Enabled {
 		return nil
 	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	p := m.Config.Policies
 	checks := []PolicyCheck{}
-	add := func(key, want, actual string, err error) {
-		v := PolicyCheck{Setting: key, Expected: want, Actual: actual, Compliant: err == nil && strings.TrimSpace(want) == strings.TrimSpace(actual)}
-		if err != nil {
-			v.Message = err.Error()
-		}
-		checks = append(checks, v)
-	}
 	if p.SSH.Enabled {
-		out, err := m.Runner.Run(ctx, "sshd", "-T")
-		effective := parseSettings(out)
-		if p.SSH.PasswordAuthentication != "" {
-			add("ssh.password_authentication", p.SSH.PasswordAuthentication, effective["passwordauthentication"], err)
+		checks = append(checks, m.checkSSHPolicy(ctx)...)
+	}
+	for _, key := range sortedKeys(p.Sysctl) {
+		value, err := m.readSysctl(ctx, key)
+		checks = append(checks, policyValueCheck("sysctl."+key, p.Sysctl[key], value, err))
+	}
+	if m.Config.Sudo.Enabled {
+		checks = append(checks, m.checkSudoRestrictions(ctx)...)
+		restricted := map[string]bool{}
+		for _, user := range m.Config.Sudo.RestrictUsers {
+			restricted[user] = true
 		}
-		if p.SSH.PasswordAuthentication == "no" {
-			add("ssh.kbd_interactive_authentication", "no", effective["kbdinteractiveauthentication"], err)
-		}
-		if p.SSH.PermitRootLogin != "" {
-			add("ssh.permit_root_login", p.SSH.PermitRootLogin, effective["permitrootlogin"], err)
-		}
-		if len(p.SSH.AllowUsers) > 0 {
-			add("ssh.allow_users", strings.Join(p.SSH.AllowUsers, " "), effective["allowusers"], err)
-		}
-		if len(p.SSH.AllowSources) > 0 {
-			out, err = m.Runner.Run(ctx, "nft", "list", "table", "inet", "anquan_ssh")
-			actual := "absent"
-			if err == nil && strings.Contains(out, "restrict_ssh") {
-				actual = "managed restriction present"
+		for _, grant := range m.Config.Sudo.Grants {
+			if restricted[grant.User] {
+				continue
+			} // fully verified by the terminal restriction above
+			runAs := grant.RunAs
+			if runAs == "" {
+				runAs = "root"
 			}
-			add("ssh.allow_sources", "managed restriction present", actual, err)
-		}
-	}
-	for _, k := range sortedKeys(p.Sysctl) {
-		out, err := m.Runner.Run(ctx, "sysctl", "-n", k)
-		add("sysctl."+k, p.Sysctl[k], strings.TrimSpace(out), err)
-	}
-	for _, grant := range m.Config.Sudo.Grants {
-		out, err := m.Runner.Run(ctx, "sudo", "-n", "-l", "-U", grant.User)
-		compliant := err == nil
-		for _, cmd := range grant.Commands {
-			if !strings.Contains(out, cmd) {
-				compliant = false
+			for _, command := range grant.Commands {
+				args := append([]string{"-n", "-l", "-U", grant.User, "-u", runAs, "--"}, strings.Fields(command)...)
+				_, err := m.Runner.Run(ctx, "sudo", args...)
+				actual := "allowed"
+				if err != nil {
+					actual = "not verified"
+				}
+				c := policyValueCheck("sudo.grant."+grant.User+"."+command, "allowed", actual, err)
+				c.Message = "Additive grant only; use restrict_users to replace a user's broader sudo permissions."
+				checks = append(checks, c)
 			}
 		}
-		message := "existing broad grants may still permit wider access; this check does not revoke other sudoers rules"
-		if err != nil {
-			message = err.Error() + "; " + message
-		}
-		checks = append(checks, PolicyCheck{Setting: "sudo.grant." + grant.User, Expected: strings.Join(grant.Commands, ", "), Actual: strings.TrimSpace(out), Compliant: compliant, Message: message})
 	}
 	if p.SessionTimeoutSeconds > 0 {
-		raw, err := os.ReadFile(m.path(sessionConfigPath))
-		want := fmt.Sprintf("TMOUT=%d", p.SessionTimeoutSeconds)
-		actual := "absent"
-		if strings.Contains(string(raw), want) {
-			actual = want
-		}
-		add("session_timeout_seconds", want, actual, err)
+		checks = append(checks, m.checkSessionTimeout(ctx))
 	}
 	if p.DisableCtrlAltDel {
-		out, err := m.Runner.Run(ctx, "systemctl", "is-enabled", "ctrl-alt-del.target")
-		if strings.TrimSpace(out) == "masked" {
-			err = nil
-		}
-		add("disable_ctrl_alt_del", "masked", strings.TrimSpace(out), err)
+		state, err := m.ctrlAltDelState(ctx)
+		c := policyValueCheck("disable_ctrl_alt_del", "masked", state, err)
+		c.Compliant = err == nil && (state == "masked" || state == "masked-runtime")
+		checks = append(checks, c)
+		burst, burstErr := m.ctrlAltDelBurstAction(ctx)
+		checks = append(checks, policyValueCheck("ctrl_alt_del_burst_action", "none", burst, burstErr))
 	}
 	if p.GRUB.Enabled {
-		raw, err := os.ReadFile(m.path(grubConfigPath))
-		actual := "absent"
-		if strings.Contains(string(raw), "password_pbkdf2 anquan-admin grub.pbkdf2.sha512.") {
-			actual = "configured"
-		}
-		add("grub.password", "configured", actual, err)
+		checks = append(checks, m.checkBootPolicy(ctx)...)
 	}
 	return checks
+}
+
+func policyStatus(mode string, checks []PolicyCheck) (string, string) {
+	if len(checks) == 0 {
+		return "no_policies", "No host hardening policies selected."
+	}
+	failed, errors := 0, 0
+	for _, check := range checks {
+		if !check.Compliant {
+			failed++
+		}
+		if check.Error != "" {
+			errors++
+		}
+	}
+	if errors > 0 {
+		return "error", fmt.Sprintf("Could not inspect %d of %d requested policies; see individual check errors.", errors, len(checks))
+	}
+	if failed > 0 {
+		if mode == "audit" {
+			return "audit_drift", fmt.Sprintf("Audit only: %d of %d requested policies differ; no hardening was applied.", failed, len(checks))
+		}
+		return "drift", fmt.Sprintf("%d of %d requested policies differ from effective host settings; see target and actual values.", failed, len(checks))
+	}
+	if mode == "audit" {
+		return "audit", fmt.Sprintf("Audit only: all %d requested policies match effective host settings.", len(checks))
+	}
+	return "compliant", fmt.Sprintf("All %d requested policies match effective host settings.", len(checks))
 }

@@ -36,6 +36,8 @@ type ComponentStatus struct {
 	ConfigHash string        `json:"config_hash,omitempty"`
 	AppliedAt  *time.Time    `json:"applied_at,omitempty"`
 	Checks     []PolicyCheck `json:"checks,omitempty"`
+	PolicyMode string        `json:"policy_mode,omitempty"`
+	CheckedAt  *time.Time    `json:"checked_at,omitempty"`
 }
 
 // Runner is replaceable in tests. Commands never pass configuration through a shell.
@@ -57,6 +59,9 @@ func (commandRunner) Run(ctx context.Context, n string, args ...string) (string,
 	if n == "apt-config" && len(b) > 1<<20 {
 		return "", errors.New("APT configuration is too large to safely validate package relay settings")
 	}
+	if n == "sudo" && len(b) > 32768 {
+		return "", errors.New("sudo policy output exceeds the verification limit; refusing to validate truncated permissions or authentication settings")
+	}
 	if n != "apt-config" && len(b) > 32768 {
 		b = b[len(b)-32768:]
 	}
@@ -70,14 +75,20 @@ type Manager struct {
 	Config        Config
 	OutputDir     string
 	DownloadRelay *downloadrelay.State
-	downloadProxy *downloadrelay.Proxy
+	// ReconcileResult lets the embedding runtime persist or clear initialization
+	// failures after a later periodic apply succeeds. Called outside m.mu.
+	ReconcileResult func([]ComponentStatus, error) error
+	downloadProxy   *downloadrelay.Proxy
 	// RootDir/Runner exist for hermetic tests; production uses / and exec.CommandContext.
-	RootDir   string
-	Runner    Runner
-	mu        sync.Mutex
-	statuses  []ComponentStatus
-	appliedAt *time.Time
-	versions  map[string]string
+	RootDir              string
+	Runner               Runner
+	mu                   sync.Mutex
+	statuses             []ComponentStatus
+	appliedAt            *time.Time
+	versions             map[string]string
+	lastPolicyPoll       time.Time
+	lastPolicyConfigHash string
+	applicationError     *ComponentStatus
 }
 
 func NewManager(cfg Config, outputDir string) *Manager {
@@ -113,19 +124,10 @@ func (m *Manager) status(ctx context.Context, name string, enabled bool) Compone
 	}
 	if name == "policies" {
 		s.Installed = true
-		s.State = "audit"
-		s.Message = "host policies are checked without enforcement"
+		s.PolicyMode = m.Config.Policies.Mode
+		s.CheckedAt = timePtr()
 		s.Checks = m.checkPolicies(ctx)
-		if m.Config.Policies.Mode == "enforce" {
-			s.State = "applied"
-			s.Message = "typed policies applied"
-		}
-		for _, check := range s.Checks {
-			if !check.Compliant {
-				s.State = "drift"
-				s.Message = "one or more requested policies do not match effective host settings"
-			}
-		}
+		s.State, s.Message = policyStatus(s.PolicyMode, s.Checks)
 		return s
 	}
 	binaryPath, err := m.Runner.LookPath(binary)
@@ -162,7 +164,9 @@ func (m *Manager) status(ctx context.Context, name string, enabled bool) Compone
 		s.Running = true
 		s.State = "ready"
 		s.Message = "sudo available; I/O logging covers sudo-managed commands only"
-		if len(m.Config.Sudo.Grants) > 0 {
+		if len(m.Config.Sudo.RestrictUsers) > 0 {
+			s.Message += "; restricted users are verified in host policy checks"
+		} else if len(m.Config.Sudo.Grants) > 0 {
 			s.Message += "; existing broad grants may still permit wider access"
 		}
 		return s
@@ -192,15 +196,21 @@ func (m *Manager) Status(ctx context.Context) []ComponentStatus {
 	}
 	statuses := []ComponentStatus{m.status(ctx, "auditd", m.Config.Enabled && m.Config.Auditd.Enabled), m.status(ctx, "tetragon", m.Config.Enabled && m.Config.Tetragon.Enabled), m.status(ctx, "sudo", m.Config.Enabled && m.Config.Sudo.Enabled), m.status(ctx, "policies", m.Config.Enabled)}
 	for i := range statuses {
-		for _, old := range m.statuses {
-			if old.Name == statuses[i].Name && old.State == "error" {
-				statuses[i].State = old.State
-				statuses[i].Message = old.Message
-				break
-			}
+		if failure := m.applicationError; failure != nil && failure.Name == statuses[i].Name {
+			statuses[i].State = failure.State
+			statuses[i].Message = failure.Message
 		}
 		statuses[i].ConfigHash = configHash(m.Config)
 		statuses[i].AppliedAt = m.appliedAt
+		if persistErr != nil && statuses[i].Name == "policies" && statuses[i].Enabled {
+			statuses[i].Checks = append(statuses[i].Checks, policyValueCheck("managed_state", "readable ownership record", "unavailable", persistErr))
+			statuses[i].State, statuses[i].Message = policyStatus(statuses[i].PolicyMode, statuses[i].Checks)
+		}
+	}
+	if persistErr != nil {
+		statuses = append(statuses, ComponentStatus{Name: "security", Enabled: m.Config.Enabled, State: "error", Message: "Cannot read security ownership state: " + persistErr.Error(), ConfigHash: configHash(m.Config)})
+	} else if failure := m.applicationError; failure != nil && failure.Name == "security" {
+		statuses = append(statuses, *failure)
 	}
 	for p, want := range persisted.configuredFiles() {
 		b, err := os.ReadFile(m.path(p))
@@ -220,6 +230,14 @@ func (m *Manager) Status(ctx context.Context) []ComponentStatus {
 			if statuses[i].Name == component {
 				statuses[i].State = "drift"
 				statuses[i].Message = "managed configuration changed or disappeared: " + p
+				if component == "policies" {
+					actual := "modified"
+					if err != nil {
+						actual = "unavailable"
+					}
+					statuses[i].Checks = append(statuses[i].Checks, policyValueCheck("managed_file."+p, "unchanged", actual, err))
+					statuses[i].State, statuses[i].Message = policyStatus(statuses[i].PolicyMode, statuses[i].Checks)
+				}
 			}
 		}
 	}
@@ -289,6 +307,9 @@ func (m *Manager) Run(ctx context.Context, emit func(Event) error) error {
 		case <-ctx.Done():
 			return nil
 		case <-status.C:
+			if err := m.reconcileEnforcedPolicies(ctx); err != nil && ctx.Err() == nil {
+				_ = emit(newEvent("policies", "reconcile_failed", "error", err.Error(), err.Error()+time.Now().UTC().Format("2006-01-02T15:04"), nil))
+			}
 			if err := emit(m.statusEvent(ctx)); err != nil {
 				return fmt.Errorf("enqueue component status: %w", err)
 			}

@@ -25,9 +25,20 @@ const firewallUnitPath = "/etc/systemd/system/anquan-ssh-allow.service"
 // Apply is synchronous. An error means the new configuration was not committed.
 // Package installation is additive; configuration files are transactionally
 // restored and previous services reloaded on a validation/activation failure.
-func (m *Manager) Apply(ctx context.Context) ([]ComponentStatus, error) {
+func (m *Manager) Apply(ctx context.Context) (result []ComponentStatus, applyErr error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	defer func() {
+		if applyErr == nil {
+			m.applicationError = nil
+			return
+		}
+		failure := ComponentStatus{Name: "security", Enabled: m.Config.Enabled, State: "error", Message: applyErr.Error(), ConfigHash: configHash(m.Config)}
+		if len(result) == 1 && result[0].State == "error" {
+			failure = result[0]
+		}
+		m.applicationError = &failure
+	}()
 	defer func() {
 		if m.downloadProxy != nil {
 			_ = m.downloadProxy.Close()
@@ -70,8 +81,14 @@ func (m *Manager) Apply(ctx context.Context) ([]ComponentStatus, error) {
 			interrupted.Next.AuditRulesTracked = true
 			return writePrivateJSON(m.journalPath(), "security-transaction", interrupted)
 		}
-		if err = m.activate(ctx, interrupted.Next, restored, interrupted.Dirty, saveRecovery); err != nil {
-			return nil, fmt.Errorf("recover previous security services: %w", err)
+		recoveryCtx, bootErr := m.bootRecoveryContext(ctx, interrupted)
+		if bootErr != nil {
+			return nil, fmt.Errorf("recover previous boot configuration: %w", bootErr)
+		}
+		recoveryErr := m.activate(recoveryCtx, interrupted.Next, restored, interrupted.Dirty, saveRecovery)
+		runtimeErr := m.restoreRuntime(ctx, interrupted.RuntimeSysctl, interrupted.RuntimeCADState)
+		if err = errors.Join(recoveryErr, runtimeErr); err != nil {
+			return nil, fmt.Errorf("recover previous security services and effective host values: %w", err)
 		}
 		previous = restored
 		if err = writePrivateJSON(m.manifestPath(), "security-managed", previous); err != nil {
@@ -110,8 +127,16 @@ func (m *Manager) Apply(ctx context.Context) ([]ComponentStatus, error) {
 				}
 			}
 		}
+		if m.Config.Policies.Mode == "enforce" && m.Config.Policies.SSH.Enabled && m.Config.Policies.SSH.StrongCrypto {
+			if err = m.ensurePackage(ctx, "ssh", "openssh-client", "openssh-clients"); err != nil {
+				return m.failed("policies", err)
+			}
+		}
 		if m.Config.Policies.Mode == "enforce" && len(m.Config.Policies.SSH.AllowSources) > 0 && m.Config.Policies.SSH.Enabled {
 			if err = m.ensurePackage(ctx, "nft", "nftables", "nftables"); err != nil {
+				return m.failed("policies", err)
+			}
+			if err = m.ensurePackage(ctx, "ss", "iproute2", "iproute"); err != nil {
 				return m.failed("policies", err)
 			}
 		}
@@ -121,6 +146,14 @@ func (m *Manager) Apply(ctx context.Context) ([]ComponentStatus, error) {
 		return m.failed("security", err)
 	}
 	next := manifest{Files: map[string]string{}, ReferencedFiles: map[string]string{}, AuditRules: cloneAuditRules(previous.AuditRules), AuditRulesTracked: true, Options: options, CtrlAltDelMasked: m.Config.Enabled && m.Config.Policies.Mode == "enforce" && m.Config.Policies.DisableCtrlAltDel, Firewall: desired[firewallConfigPath].Data != nil}
+	next.FirewallOriginalUnitState = previous.FirewallOriginalUnitState
+	if next.Firewall && !previous.Firewall {
+		state, stateErr := m.sshFirewallUnitState(ctx)
+		if stateErr != nil {
+			return m.failed("policies", stateErr)
+		}
+		next.FirewallOriginalUnitState = state
+	}
 	for p, f := range desired {
 		next.Files[p] = hashString(string(f.Data))
 	}
@@ -141,9 +174,14 @@ func (m *Manager) Apply(ctx context.Context) ([]ComponentStatus, error) {
 		}
 	}
 	next.CtrlAltDelOriginallyMasked = previous.CtrlAltDelOriginallyMasked
+	next.CtrlAltDelOriginalState = previous.CtrlAltDelOriginalState
 	if next.CtrlAltDelMasked && !previous.CtrlAltDelMasked {
-		out, _ := m.Runner.Run(ctx, "systemctl", "is-enabled", "ctrl-alt-del.target")
-		next.CtrlAltDelOriginallyMasked = strings.TrimSpace(out) == "masked"
+		state, e := m.ctrlAltDelState(ctx)
+		if e != nil {
+			return m.failed("policies", e)
+		}
+		next.CtrlAltDelOriginallyMasked = state == "masked" || state == "masked-runtime"
+		next.CtrlAltDelOriginalState = state
 	}
 	next.Sysctl = map[string]string{}
 	next.SysctlOriginal = map[string]string{}
@@ -152,7 +190,7 @@ func (m *Manager) Apply(ctx context.Context) ([]ComponentStatus, error) {
 			next.Sysctl[k] = m.Config.Policies.Sysctl[k]
 			v, ok := previous.SysctlOriginal[k]
 			if !ok {
-				out, e := m.Runner.Run(ctx, "sysctl", "-n", k)
+				out, e := m.readSysctl(ctx, k)
 				if e != nil {
 					return m.failed("policies", e)
 				}
@@ -171,14 +209,84 @@ func (m *Manager) Apply(ctx context.Context) ([]ComponentStatus, error) {
 			dirty[p] = true
 		}
 	}
+	// File equality does not imply runtime equality. Reapplying the same
+	// selected policy must repair values changed since the last successful ACK.
+	runtimeSysctl := map[string]string{}
+	keys := map[string]bool{}
+	for key := range previous.Sysctl {
+		keys[key] = true
+	}
+	for key := range next.Sysctl {
+		keys[key] = true
+	}
+	for _, key := range sortedKeys(keys) {
+		actual, e := m.readSysctl(ctx, key)
+		if e != nil {
+			return m.failed("policies", e)
+		}
+		runtimeSysctl[key] = actual
+		if want, selected := next.Sysctl[key]; selected && actual != normalizePolicyValue(want) {
+			equal, dirty[sysctlConfigPath] = false, true
+		}
+	}
+	var runtimeCADState *string
+	if previous.CtrlAltDelMasked || next.CtrlAltDelMasked {
+		if err := m.validateCtrlAltDelPaths(); err != nil {
+			return m.failed("policies", err)
+		}
+		state, e := m.ctrlAltDelState(ctx)
+		if e != nil {
+			return m.failed("policies", e)
+		}
+		runtimeCADState = &state
+		if next.CtrlAltDelMasked {
+			action, e := m.ctrlAltDelBurstAction(ctx)
+			if e != nil {
+				return m.failed("policies", e)
+			}
+			if state != "masked" || action != "none" {
+				equal, dirty[ctrlAltDelConfigPath] = false, true
+			}
+		}
+	}
+	if drift, e := m.sshRuntimeDrift(ctx, previous); e != nil {
+		return m.failed("policies", e)
+	} else if drift {
+		equal, dirty[sshConfigPath] = false, true
+		if next.Firewall {
+			dirty[firewallConfigPath] = true
+		}
+	}
+	if m.Config.Enabled && m.Config.Policies.Mode == "enforce" && m.Config.Policies.GRUB.Enabled {
+		if err := m.validateBootPolicy(ctx); err != nil {
+			equal, dirty[grubConfigPath] = false, true
+		}
+	}
 	if equal {
+		if err = m.validateFiles(ctx, desired); err != nil {
+			return m.failed("policies", err)
+		}
+		if m.Config.Enabled && m.Config.Policies.Mode == "enforce" {
+			if err = m.validateSessionPolicy(ctx); err != nil {
+				return m.failed("policies", err)
+			}
+			if err = m.validateBootPolicy(ctx); err != nil {
+				return m.failed("policies", err)
+			}
+			if err = m.validateEffectivePolicies(ctx); err != nil {
+				return m.failed("policies", err)
+			}
+		}
 		m.appliedAt = previous.AppliedAt
 		m.statuses = m.baseStatuses(ctx)
 		return append([]ComponentStatus(nil), m.statuses...), nil
 	}
-	tx := &transaction{manager: m, touched: map[string]bool{}, previous: previous, next: next, dirty: dirty}
+	tx := &transaction{manager: m, touched: map[string]bool{}, previous: previous, next: next, dirty: dirty, runtimeSysctl: runtimeSysctl, runtimeCADState: runtimeCADState}
 	// Save runtime sysctl values before the first write, so rollback restores the
 	// actual running values rather than reapplying unrelated system files.
+	if err = m.snapshotBootFiles(tx, previous, next); err != nil {
+		return m.failed("policies", err)
+	}
 	if err = tx.save(); err != nil {
 		return m.failed("security", err)
 	}
@@ -191,8 +299,9 @@ func (m *Manager) Apply(ctx context.Context) ([]ComponentStatus, error) {
 		restored.AuditRulesTracked = true
 		tx.next.AuditRules = restored.AuditRules
 		if rerr == nil {
-			rerr = m.activate(rollbackCtx, next, restored, dirty, tx.save)
+			rerr = m.activate(withBootRollback(rollbackCtx), next, restored, dirty, tx.save)
 		}
+		rerr = errors.Join(rerr, m.restoreRuntime(rollbackCtx, tx.runtimeSysctl, tx.runtimeCADState))
 		if rerr == nil && (hadManifest || len(restored.AuditRules) > 0) {
 			rerr = writePrivateJSON(m.manifestPath(), "security-managed", restored)
 		}
@@ -251,6 +360,17 @@ func (m *Manager) Apply(ctx context.Context) ([]ComponentStatus, error) {
 	if err = m.activate(ctx, previous, next, dirty, tx.save); err != nil {
 		return rollback(err)
 	}
+	if m.Config.Enabled && m.Config.Policies.Mode == "enforce" {
+		if err = m.validateSessionPolicy(ctx); err != nil {
+			return rollback(err)
+		}
+		if err = m.validateBootPolicy(ctx); err != nil {
+			return rollback(err)
+		}
+		if err = m.validateEffectivePolicies(ctx); err != nil {
+			return rollback(err)
+		}
+	}
 	next.AppliedAt = timePtr()
 	if err = writePrivateJSON(m.manifestPath(), "security-managed", next); err != nil {
 		return rollback(err)
@@ -272,10 +392,6 @@ func (m *Manager) baseStatuses(ctx context.Context) []ComponentStatus {
 	for i := range s {
 		s[i].AppliedAt = m.appliedAt
 		s[i].ConfigHash = configHash(m.Config)
-		if s[i].Name == "policies" && s[i].State != "drift" && m.Config.Enabled && m.Config.Policies.Mode == "enforce" {
-			s[i].State = "applied"
-			s[i].Message = "typed policy configuration applied and validated"
-		}
 	}
 	return s
 }
@@ -373,6 +489,11 @@ func (m *Manager) desiredFiles(ctx context.Context) (map[string]managedFile, []s
 		add(auditRulesPath, b.String(), 0600)
 	}
 	if m.Config.Sudo.Enabled {
+		if m.Config.Policies.Mode == "enforce" {
+			if err := m.validateSudoGrantAuthentication(); err != nil {
+				return nil, nil, err
+			}
+		}
 		s := "# Managed by anquan. Existing sudoers rules remain in effect.\nDefaults logfile=\"/var/log/anquan-sudo.log\"\n"
 		if m.Config.Sudo.IOLogging {
 			s += "Defaults log_input,log_output\nDefaults iolog_dir=\"/var/log/anquan-sudo-io\"\nDefaults iolog_file=\"%{seq}\"\n"
@@ -397,6 +518,15 @@ func (m *Manager) desiredFiles(ctx context.Context) (map[string]managedFile, []s
 			}
 		}
 		add(sudoConfigPath, s, 0440)
+		if m.Config.Policies.Mode == "enforce" && len(m.sudoPolicyUsers()) > 0 {
+			if err := m.validateSudoRestrictionOrder(); err != nil {
+				return nil, nil, err
+			}
+			if err := m.validateSudoRestrictedAccounts(ctx); err != nil {
+				return nil, nil, err
+			}
+			add(sudoRestrictionPath, m.sudoRestrictionFile(), 0440)
+		}
 	}
 	if m.Config.Tetragon.Enabled {
 		opts, err := tetragonOptions(m.Config.Tetragon.Config)
@@ -432,51 +562,12 @@ func (m *Manager) desiredFiles(ctx context.Context) (map[string]managedFile, []s
 	}
 	p := m.Config.Policies
 	if p.SSH.Enabled {
-		main, err := os.ReadFile(m.path("/etc/ssh/sshd_config"))
+		sshFiles, err := m.desiredSSHFiles(ctx)
 		if err != nil {
 			return nil, nil, err
 		}
-		include := false
-		for _, line := range strings.Split(string(main), "\n") {
-			v := strings.Fields(line)
-			if len(v) > 1 && strings.EqualFold(v[0], "Include") {
-				for _, pat := range v[1:] {
-					if pat == "/etc/ssh/sshd_config.d/*.conf" {
-						include = true
-					}
-				}
-			}
-		}
-		if !include {
-			return nil, nil, errors.New("sshd_config must include /etc/ssh/sshd_config.d/*.conf; refusing to replace the administrator's configuration")
-		}
-		var b strings.Builder
-		b.WriteString("# Managed by anquan\n")
-		if p.SSH.PasswordAuthentication != "" {
-			fmt.Fprintln(&b, "PasswordAuthentication", p.SSH.PasswordAuthentication)
-			if p.SSH.PasswordAuthentication == "no" {
-				fmt.Fprintln(&b, "KbdInteractiveAuthentication no")
-			}
-		}
-		if p.SSH.PermitRootLogin != "" {
-			fmt.Fprintln(&b, "PermitRootLogin", p.SSH.PermitRootLogin)
-		}
-		if len(p.SSH.AllowUsers) > 0 {
-			for _, u := range p.SSH.AllowUsers {
-				if _, err = m.Runner.Run(ctx, "id", "-u", u); err != nil {
-					return nil, nil, fmt.Errorf("SSH allow_users account %s does not exist: %w", u, err)
-				}
-			}
-			fmt.Fprintln(&b, "AllowUsers", strings.Join(p.SSH.AllowUsers, " "))
-		}
-		add(sshConfigPath, b.String(), 0600)
-		if len(p.SSH.AllowSources) > 0 {
-			rules, err := m.firewallRules(ctx, p.SSH.AllowSources)
-			if err != nil {
-				return nil, nil, err
-			}
-			add(firewallConfigPath, rules, 0600)
-			add(firewallUnitPath, "[Unit]\nDescription=Anquan SSH source restrictions\nAfter=network-pre.target\nBefore=sshd.service ssh.service\n[Service]\nType=oneshot\nRemainAfterExit=yes\nExecStart=/usr/sbin/nft -f /etc/anquan/ssh-allow.nft\nExecReload=/usr/sbin/nft -f /etc/anquan/ssh-allow.nft\n[Install]\nWantedBy=multi-user.target\n", 0644)
+		for path, file := range sshFiles {
+			f[path] = file
 		}
 	}
 	if len(p.Sysctl) > 0 {
@@ -488,10 +579,19 @@ func (m *Manager) desiredFiles(ctx context.Context) (map[string]managedFile, []s
 		add(sysctlConfigPath, b.String(), 0644)
 	}
 	if p.SessionTimeoutSeconds > 0 {
-		add(sessionConfigPath, fmt.Sprintf("# Managed by anquan; applies to interactive Bash prompts.\nif [ -n \"${BASH_VERSION:-}\" ] && [ -n \"${PS1:-}\" ]; then\n  TMOUT=%d\n  readonly TMOUT\n  export TMOUT\nfi\n", p.SessionTimeoutSeconds), 0644)
+		add(sessionConfigPath, sessionPolicyScript(p.SessionTimeoutSeconds), 0644)
+	}
+	if p.DisableCtrlAltDel {
+		add(ctrlAltDelConfigPath, "# Managed by anquan\n[Manager]\nCtrlAltDelBurstAction=none\n", 0644)
 	}
 	if p.GRUB.Enabled {
-		add(grubConfigPath, "#!/bin/sh\n# Managed by anquan. GRUB authentication may also protect restricted boot entries.\ncat <<'ANQUAN_GRUB_AUTH'\nset superusers=\"anquan-admin\"\nexport superusers\npassword_pbkdf2 anquan-admin "+p.GRUB.PasswordHash+"\nANQUAN_GRUB_AUTH\n", 0700)
+		if err := m.validateBootEnvironment(); err != nil {
+			return nil, nil, err
+		}
+		add(grubConfigPath, bootAuthenticationScript(p.GRUB.PasswordHash), 0700)
+		if p.GRUB.ProtectSingleUser {
+			add(bootRecoveryConfigPath, "# Managed by anquan; recovery entries must be generated and authenticated.\nGRUB_DISABLE_RECOVERY=false\n", 0644)
+		}
 	}
 	sort.Strings(options)
 	return f, options, nil
@@ -504,25 +604,15 @@ func (m *Manager) validateFiles(ctx context.Context, files map[string]managedFil
 		if _, err := m.Runner.Run(ctx, "visudo", "-c"); err != nil {
 			return err
 		}
+		if _, ok := files[sudoRestrictionPath]; ok {
+			if err := m.validateSudoRestrictions(ctx); err != nil {
+				return err
+			}
+		}
 	}
 	if _, ok := files[sshConfigPath]; ok {
-		if _, err := m.Runner.Run(ctx, "sshd", "-t"); err != nil {
+		if err := m.validateSSHPolicy(ctx); err != nil {
 			return err
-		}
-		out, err := m.Runner.Run(ctx, "sshd", "-T")
-		if err != nil {
-			return err
-		}
-		effective := parseSettings(out)
-		s := m.Config.Policies.SSH
-		if s.PasswordAuthentication != "" && effective["passwordauthentication"] != s.PasswordAuthentication {
-			return errors.New("effective SSH PasswordAuthentication differs from requested value (earlier setting or Match block)")
-		}
-		if s.PermitRootLogin != "" && effective["permitrootlogin"] != s.PermitRootLogin {
-			return errors.New("effective SSH PermitRootLogin differs from requested value")
-		}
-		if len(s.AllowUsers) > 0 && effective["allowusers"] != strings.Join(s.AllowUsers, " ") {
-			return errors.New("effective SSH AllowUsers differs from requested users")
 		}
 	}
 	if _, ok := files[firewallConfigPath]; ok {
@@ -592,16 +682,8 @@ func (m *Manager) activate(ctx context.Context, previous, next manifest, dirty m
 			return err
 		}
 	}
-	if next.Firewall {
-		if _, err := m.Runner.Run(ctx, "nft", "-f", m.path(firewallConfigPath)); err != nil {
-			return err
-		}
-		if _, err := m.Runner.Run(ctx, "systemctl", "enable", "anquan-ssh-allow.service"); err != nil {
-			return err
-		}
-	} else if previous.Firewall {
-		_, _ = m.Runner.Run(ctx, "systemctl", "disable", "anquan-ssh-allow.service")
-		if _, err := m.Runner.Run(ctx, "nft", "delete", "table", "inet", "anquan_ssh"); err != nil {
+	if previous.Firewall || next.Firewall {
+		if err := m.reconcileSSHFirewall(ctx, previous, next); err != nil {
 			return err
 		}
 	}
@@ -627,24 +709,53 @@ func (m *Manager) activate(ctx context.Context, previous, next manifest, dirty m
 				v = previous.SysctlOriginal[k]
 			}
 			if v != "" {
-				if _, err := m.Runner.Run(ctx, "sysctl", "-w", k+"="+v); err != nil {
+				if err := m.writeSysctl(ctx, k, v); err != nil {
 					return err
 				}
 			}
 		}
 	}
-	if previous.CtrlAltDelMasked != next.CtrlAltDelMasked {
-		action := "unmask"
-		if next.CtrlAltDelMasked || previous.CtrlAltDelOriginallyMasked {
-			action = "mask"
-		}
-		if _, err := m.Runner.Run(ctx, "systemctl", action, "ctrl-alt-del.target"); err != nil {
+	if changed(ctrlAltDelConfigPath) {
+		if _, err := m.Runner.Run(ctx, "systemctl", "daemon-reexec"); err != nil {
 			return err
 		}
 	}
-	if changed(grubConfigPath) {
+	if previous.CtrlAltDelMasked != next.CtrlAltDelMasked || dirty[ctrlAltDelConfigPath] {
+		state := previous.CtrlAltDelOriginalState
+		if state == "" {
+			state = "static"
+			if previous.CtrlAltDelOriginallyMasked {
+				state = "masked"
+			}
+		}
+		if next.CtrlAltDelMasked {
+			state = "masked"
+		}
+		if err := m.setCtrlAltDelState(ctx, state); err != nil {
+			return err
+		}
+	}
+	if next.CtrlAltDelMasked {
+		action, err := m.ctrlAltDelBurstAction(ctx)
+		if err != nil {
+			return err
+		}
+		if action != "none" {
+			return fmt.Errorf("CtrlAltDelBurstAction did not take effect: expected none, actual %q", action)
+		}
+	}
+	if !isBootRollback(ctx) && (changed(grubConfigPath) || changed(bootRecoveryConfigPath)) {
 		if err := m.updateGRUB(ctx); err != nil {
 			return err
+		}
+		if nextFiles[grubConfigPath] != "" {
+			if err := m.validateGeneratedBootFiles(ctx, nextFiles[bootRecoveryConfigPath] != ""); err != nil {
+				return err
+			}
+		} else if previous.Files[grubConfigPath] != "" {
+			if err := m.validateBootWithdrawal(ctx); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
