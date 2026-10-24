@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,7 +23,7 @@ import (
 const maxConfigBytes = 4 << 20
 
 type options struct {
-	config, output, goos, goarch, goCommand string
+	config, output, goos, goarch, goCommand, master string
 }
 
 func main() {
@@ -41,6 +42,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	flags.StringVar(&opts.goos, "goos", "linux", "target operating system")
 	flags.StringVar(&opts.goarch, "goarch", runtime.GOARCH, "target architecture, for example amd64 or arm64")
 	flags.StringVar(&opts.goCommand, "go", "go", "Go compiler command or path")
+	flags.StringVar(&opts.master, "master", defaults.DefaultMasterAddress, "default Master IPv4 or IPv6 address embedded in the agent (TCP port 55556)")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
@@ -50,6 +52,11 @@ func run(args []string, stdout, stderr io.Writer) error {
 	if flags.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
 	}
+	master, err := buildMasterAddress(opts.master)
+	if err != nil {
+		return err
+	}
+	opts.master = master
 	if opts.output == "" {
 		opts.output = "anqu"
 		if opts.goos == "windows" {
@@ -61,9 +68,21 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "agent=%s target=%s/%s\n", opts.output, opts.goos, opts.goarch)
 	fmt.Fprintf(stdout, "update manifest=%s.update.json (keep beside the executable for Master packaging)\n", opts.output)
-	fmt.Fprintln(stdout, "Run the Linux agent as root without arguments to install and start agent.service using "+defaults.MasterAddress+". Optional config.age remains a local fallback; no key setup required.")
+	fmt.Fprintln(stdout, "Run the Linux agent as root without arguments to install and start agent.service using "+opts.master+". Optional config.age remains a local fallback; no key setup required.")
 	fmt.Fprintln(stdout, "Embedded encryption increases extraction cost; administrators and reverse engineers can still recover it.")
 	return nil
+}
+
+func buildMasterAddress(master string) (string, error) {
+	master = strings.TrimSpace(master)
+	if master == "" {
+		return defaults.DefaultMasterAddress, nil
+	}
+	ip := net.ParseIP(master)
+	if ip == nil || ip.IsUnspecified() || ip.IsMulticast() {
+		return "", errors.New("invalid -master: use a unicast IPv4 or IPv6 address without a port")
+	}
+	return ip.String(), nil
 }
 
 func readYAML(path string) ([]byte, error) {
@@ -104,8 +123,11 @@ func readYAML(path string) ([]byte, error) {
 }
 
 func build(opts options, stdout, stderr io.Writer) error {
+	master, err := buildMasterAddress(opts.master)
+	if err != nil {
+		return err
+	}
 	var data []byte
-	var err error
 	if opts.config != "" {
 		data, err = readYAML(opts.config)
 		if err != nil {
@@ -172,7 +194,8 @@ func build(opts options, stdout, stderr io.Writer) error {
 	if err := staging.Close(); err != nil {
 		return err
 	}
-	cmd := exec.Command(compiler, "build", "-trimpath", "-buildvcs=false", "-ldflags=-s -w -buildid=", "-o", stagePath, "./cmd/anqu")
+	ldflags := "-s -w -buildid= -X=anqu/internal/defaults.MasterAddress=" + master
+	cmd := exec.Command(compiler, "build", "-trimpath", "-buildvcs=false", "-ldflags="+ldflags, "-o", stagePath, "./cmd/anqu")
 	cmd.Dir = root
 	cmd.Env = buildEnv(os.Environ(), map[string]string{
 		"CGO_ENABLED": "0", "GOOS": opts.goos, "GOARCH": opts.goarch,

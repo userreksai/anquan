@@ -11,7 +11,38 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"anqu/internal/defaults"
 )
+
+func TestBuildMasterAddress(t *testing.T) {
+	for _, tc := range []struct{ input, want string }{
+		{"", "172.22.0.27"},
+		{" \t", "172.22.0.27"},
+		{"172.22.0.27", "172.22.0.27"},
+		{"192.0.2.10", "192.0.2.10"},
+		{" 192.0.2.10 ", "192.0.2.10"},
+		{"2001:0db8::10", "2001:db8::10"},
+	} {
+		t.Run(tc.input, func(t *testing.T) {
+			got, err := buildMasterAddress(tc.input)
+			if err != nil || got != tc.want {
+				t.Fatalf("Master %q = %q, %v; want %q", tc.input, got, err, tc.want)
+			}
+		})
+	}
+	for _, input := range []string{
+		"master.example.com", "http://192.0.2.10", "192.0.2.10:55556", "[2001:db8::10]",
+		"192.0.2.10,192.0.2.11", "999.1.1.1", "0.0.0.0", "::", "224.0.0.1", "ff02::1",
+		"192.0.2.10\nExecStart=/bad", "192.0.2.10 -X=other.setting=value", "fe80::1%eth0",
+	} {
+		t.Run("invalid/"+input, func(t *testing.T) {
+			if _, err := buildMasterAddress(input); err == nil {
+				t.Fatalf("invalid Master %q accepted", input)
+			}
+		})
+	}
+}
 
 func TestReadYAMLRejectsJSONAndOversize(t *testing.T) {
 	for _, tc := range []struct {
@@ -96,28 +127,44 @@ func main(){ b,_:=json.Marshal(os.Args); _=os.WriteFile(os.Getenv("ANQU_BUILD_TE
 	}
 	capture := filepath.Join(temp, "args.json")
 	t.Setenv("ANQU_BUILD_TEST_CAPTURE", capture)
-	err := build(options{config: config, output: output, goos: "linux", goarch: "amd64", goCommand: helper}, io.Discard, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "compile agent") {
-		t.Fatalf("expected compiler error, got %v", err)
-	}
-	got, err := os.ReadFile(output)
-	if err != nil || string(got) != "old agent" {
-		t.Fatalf("existing output damaged: %q, %v", got, err)
-	}
-	args, err := os.ReadFile(capture)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var recorded []string
-	if err := json.Unmarshal(args, &recorded); err != nil {
-		t.Fatal(err)
-	}
-	if recorded[len(recorded)-1] != "./cmd/anqu" {
-		t.Fatal("wrong compiler target")
-	}
-	staged, err := filepath.Glob(filepath.Join(temp, ".anqu-output-*"))
-	if err != nil || len(staged) != 0 {
-		t.Fatalf("staging outputs remain: %v, %v", staged, err)
+	for _, master := range []string{"", "192.0.2.10", "2001:db8::10"} {
+		t.Run("master="+master, func(t *testing.T) {
+			err := build(options{config: config, output: output, goos: "linux", goarch: "amd64", goCommand: helper, master: master}, io.Discard, io.Discard)
+			if err == nil || !strings.Contains(err.Error(), "compile agent") {
+				t.Fatalf("expected compiler error, got %v", err)
+			}
+			got, err := os.ReadFile(output)
+			if err != nil || string(got) != "old agent" {
+				t.Fatalf("existing output damaged: %q, %v", got, err)
+			}
+			args, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var recorded []string
+			if err := json.Unmarshal(args, &recorded); err != nil {
+				t.Fatal(err)
+			}
+			if recorded[len(recorded)-1] != "./cmd/anqu" {
+				t.Fatal("wrong compiler target")
+			}
+			wantMaster := master
+			if wantMaster == "" {
+				wantMaster = defaults.DefaultMasterAddress
+			}
+			wantFlags := "-ldflags=-s -w -buildid= -X=anqu/internal/defaults.MasterAddress=" + wantMaster
+			foundFlags := false
+			for _, arg := range recorded {
+				foundFlags = foundFlags || arg == wantFlags
+			}
+			if !foundFlags {
+				t.Fatalf("compiler did not receive Master %q: %q", wantMaster, recorded)
+			}
+			staged, err := filepath.Glob(filepath.Join(temp, ".anqu-output-*"))
+			if err != nil || len(staged) != 0 {
+				t.Fatalf("staging outputs remain: %v, %v", staged, err)
+			}
+		})
 	}
 }
 
@@ -132,7 +179,7 @@ func TestOutputCannotReplaceConfiguration(t *testing.T) {
 }
 
 func TestArgumentValidation(t *testing.T) {
-	for _, args := range [][]string{{"unexpected"}, {"-does-not-exist"}} {
+	for _, args := range [][]string{{"unexpected"}, {"-does-not-exist"}, {"-master"}, {"-master", "invalid"}} {
 		if err := run(args, io.Discard, io.Discard); err == nil {
 			t.Fatalf("invalid args accepted: %v", args)
 		}
