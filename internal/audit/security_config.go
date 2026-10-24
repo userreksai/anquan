@@ -84,7 +84,7 @@ func normalizeSecurity(c *Config, base string, rules pathRules) error {
 		return fmt.Errorf("security.native_fim.max_diff_bytes must be 256..16384")
 	}
 	if len(f.Paths) == 0 {
-		f.Paths = []string{"/etc/passwd", "/etc/shadow", "/etc/group", "/etc/ssh", "/etc/sudoers", "/etc/sudoers.d", "/etc/cron.d", "/etc/crontab", "/var/spool/cron", "/root/.ssh"}
+		f.Paths = append([]string{"/etc/passwd", "/etc/shadow", "/etc/group", "/etc/ssh", "/etc/sudoers", "/etc/sudoers.d", "/root/.ssh"}, security.DefaultCronPaths()...)
 	}
 	if len(f.Paths) > 256 {
 		return fmt.Errorf("security.native_fim.paths exceeds 256 roots")

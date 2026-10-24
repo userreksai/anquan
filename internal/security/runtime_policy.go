@@ -12,9 +12,10 @@ import (
 const ctrlAltDelConfigPath = "/etc/systemd/system.conf.d/90-anquan-ctrl-alt-del.conf"
 
 // Enforce continues to reconcile selected policies on the configured status
-// interval. Audit never enters the mutating Apply path from a monitoring tick.
+// interval. Optional cron audit watches are also reconciled in audit mode;
+// Apply's policy gates still prevent enforcing any host hardening in that mode.
 func (m *Manager) reconcileEnforcedPolicies(ctx context.Context) error {
-	if !m.Config.Enabled || m.Config.Policies.Mode != "enforce" {
+	if !m.Config.Enabled || (m.Config.Policies.Mode != "enforce" && !m.hasCronAuditWatches()) {
 		return nil
 	}
 	statuses, err := m.Apply(ctx)

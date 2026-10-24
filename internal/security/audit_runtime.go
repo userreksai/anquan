@@ -16,6 +16,8 @@ const (
 	maxAuditRuleCount = 1026
 )
 
+var errCronAuditPathDisappeared = errors.New("optional cron audit path disappeared during rule loading")
+
 // auditRuleLines retains each complete rule, including quotes and internal
 // whitespace. Passing a rule through argv tokenization can change auditctl's
 // interpretation of quoted field values, so each rule is loaded with -R.
@@ -103,12 +105,23 @@ func (m *Manager) reconcileAudit(ctx context.Context, current map[string]bool, s
 		return fmt.Errorf("audit runtime rule count exceeds %d", maxAuditRuleCount)
 	}
 	target := make(map[string]bool, len(targetRules))
+	available := targetRules[:0]
 	for _, rule := range targetRules {
 		if err := validateAuditRuntimeRule(rule); err != nil {
 			return err
 		}
+		if path := cronAuditRulePath(rule); path != "" {
+			if _, err := os.Stat(m.path(path)); err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				return fmt.Errorf("inspect cron audit watch %s: %w", path, err)
+			}
+		}
 		target[rule] = true
+		available = append(available, rule)
 	}
+	targetRules = available
 	for rule, owned := range current {
 		if owned {
 			if err := validateAuditRuntimeRule(rule); err != nil {
@@ -140,6 +153,9 @@ func (m *Manager) reconcileAudit(ctx context.Context, current map[string]bool, s
 	}
 	for _, rule := range targetRules {
 		existed, err := m.runAuditRule(ctx, rule, true)
+		if errors.Is(err, errCronAuditPathDisappeared) {
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("load audit rule %q: %w", rule, err)
 		}
@@ -192,6 +208,18 @@ func (m *Manager) runAuditRule(ctx context.Context, rule string, add bool) (alre
 	}
 	if auditRuleExpectedKernelError(out, want, name) {
 		return add, nil
+	}
+	if !add && auditRuleExpectedKernelError(out, "Error sending delete rule request (No rule matches)", name) {
+		return false, nil
+	}
+	if add && cronAuditRulePath(rule) != "" && auditRuleExpectedKernelError(out, "Error sending add rule data request (No such file or directory)", name) {
+		// Ignore only a verified disappearance and its exact kernel error.
+		// Permission failures and extra diagnostics must still reject Apply.
+		if _, statErr := os.Stat(m.path(cronAuditRulePath(rule))); os.IsNotExist(statErr) {
+			return false, errCronAuditPathDisappeared
+		} else if statErr != nil {
+			return false, statErr
+		}
 	}
 	return false, err
 }

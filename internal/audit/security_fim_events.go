@@ -130,8 +130,18 @@ func nativePlanObservation(state *nativeFIMState, c Config, o nativeFIMObservati
 	if has {
 		after = *o.After
 	}
-	if !nativeInScope(o.Path, state.Roots) && has && after.Type != "missing" && !o.Observed {
+	// A newly assigned root starts with a baseline even when it does not yet
+	// exist. Retaining that absence lets its first later creation be an added
+	// event without creating the optional file or reporting a startup failure.
+	if !nativeInScope(o.Path, state.Roots) && has && !o.Observed {
 		state.Files[o.Path] = after
+		return nil
+	}
+	if has && after.Type == "missing" && !had {
+		state.Files[o.Path] = after
+		return nil
+	}
+	if had && before.Type == "missing" && (!has || after.Type == "missing") {
 		return nil
 	}
 	if has && after.Type == "file" {
@@ -152,10 +162,6 @@ func nativePlanObservation(state *nativeFIMState, c Config, o nativeFIMObservati
 	if !had && !has && !o.Observed {
 		return nil
 	}
-	if !had && has && after.Type == "directory" {
-		state.Files[o.Path] = after
-		return nil
-	}
 	if !had && !has {
 		before = nativeFile{Type: "file", ContentStatus: "unavailable", ContentTracked: nativeCaptureCreated(c.Security.NativeFIM)}
 		had = true
@@ -168,7 +174,9 @@ func nativePlanObservation(state *nativeFIMState, c Config, o nativeFIMObservati
 		change = "deleted"
 	}
 	if has && after.Type == "missing" {
-		change = "missing"
+		// Polling and real-time deletion share the same public transition.
+		// The missing value remains as the exact root's durable tombstone.
+		change = "deleted"
 	}
 	if had && before.Type == "missing" && has && after.Type != "missing" {
 		change = "added"
@@ -383,6 +391,25 @@ func nativeAccumulate(bursts map[string]*nativeFIMBurst, activity nativeWatchEve
 	return nil
 }
 
+// Directory notifications also cover ancestors of an optional root. A newly
+// available tree can already contain files by the time its watches are added;
+// reconcile it promptly rather than waiting for the periodic safety scan.
+func nativeDirectoryChange(activity nativeWatchEvent, roots []string) bool {
+	if activity.Mask&(nativeCreate|nativeMovedTo|nativeDelete|nativeMovedFrom|nativeDeleteSelf|nativeMoveSelf) == 0 {
+		return false
+	}
+	if activity.Mask&(nativeIsDir|nativeDeleteSelf|nativeMoveSelf) != 0 ||
+		(activity.Snapshot != nil && activity.Snapshot.Type == "directory") {
+		return true
+	}
+	for _, root := range roots {
+		if activity.Path != root && inside(activity.Path, root) {
+			return true
+		}
+	}
+	return false
+}
+
 func nativeFIMLoop(ctx context.Context, c Config, emit func(security.Event) error, health func(error)) {
 	capture := func(path string, mask uint32) *nativeFile {
 		if mask&(nativeCreate|nativeMovedTo|nativeModify|nativeAttrib|nativeCloseWrite) == 0 {
@@ -406,6 +433,18 @@ func nativeFIMLoop(ctx context.Context, c Config, emit func(security.Event) erro
 	flush := time.NewTicker(50 * time.Millisecond)
 	defer flush.Stop()
 	bursts := map[string]*nativeFIMBurst{}
+	var directoryFirst, directoryLast time.Time
+	requestReconcile := func() {
+		directoryLast = time.Now()
+		if directoryFirst.IsZero() {
+			directoryFirst = directoryLast
+		}
+	}
+	markDirectoryChange := func(activity nativeWatchEvent) {
+		if nativeDirectoryChange(activity, c.Security.NativeFIM.Paths) {
+			requestReconcile()
+		}
+	}
 	flushReady := func(force bool) {
 		paths := make([]string, 0, len(bursts))
 		for p, b := range bursts {
@@ -428,6 +467,13 @@ func nativeFIMLoop(ctx context.Context, c Config, emit func(security.Event) erro
 			}
 		}
 		health(err)
+	}
+	reconcile := func() error {
+		skip := map[string]bool{}
+		for p := range bursts {
+			skip[p] = true
+		}
+		return reconcileNativeFIM(ctx, c, skip, emit)
 	}
 	for {
 		select {
@@ -452,6 +498,7 @@ func nativeFIMLoop(ctx context.Context, c Config, emit func(security.Event) erro
 			}
 			if activity.Err != nil {
 				health(activity.Err)
+				requestReconcile()
 				// Diagnostic failures remain visible, but ordinary raw kernel masks
 				// are never separate runtime events or notifications.
 				err := emit(security.Event{Type: "security_event", Time: time.Now().UTC(), Component: "native_fim", Data: map[string]any{"source": "native_fim", "kind": "watch_error", "severity": "warning", "path": activity.Path, "message": activity.Err.Error()}})
@@ -459,6 +506,11 @@ func nativeFIMLoop(ctx context.Context, c Config, emit func(security.Event) erro
 					health(err)
 				}
 				continue
+			}
+			// The ancestor itself need not be in scope: creating /var/spool
+			// must activate a still-missing /var/spool/cron root as it appears.
+			if activity.Path != "" && !nativeExcluded(c, activity.Path) {
+				markDirectoryChange(activity)
 			}
 			if activity.Path == "" || nativeExcluded(c, activity.Path) || !nativeInScope(activity.Path, c.Security.NativeFIM.Paths) {
 				continue
@@ -472,13 +524,19 @@ func nativeFIMLoop(ctx context.Context, c Config, emit func(security.Event) erro
 			}
 		case <-flush.C:
 			flushReady(false)
+			if !directoryFirst.IsZero() && (time.Since(directoryLast) >= 200*time.Millisecond || time.Since(directoryFirst) >= 2*time.Second) {
+				err := reconcile()
+				health(err)
+				if err == nil {
+					directoryFirst, directoryLast = time.Time{}, time.Time{}
+				} else {
+					// Retry transient read/backpressure failures without a busy loop.
+					directoryFirst, directoryLast = time.Now(), time.Now()
+				}
+			}
 		case <-ticker.C:
 			flushReady(false)
-			skip := map[string]bool{}
-			for p := range bursts {
-				skip[p] = true
-			}
-			health(reconcileNativeFIM(ctx, c, skip, emit))
+			health(reconcile())
 		}
 	}
 }

@@ -37,8 +37,16 @@ func watchNativePaths(parent context.Context, roots []string, excluded func(stri
 		defer close(done)
 		defer close(ch)
 		defer syscall.Close(fd)
-		watches := map[int]string{}
-		watched := map[string]bool{}
+		type directoryWatch struct {
+			path string
+			info os.FileInfo
+		}
+		watches := map[int]directoryWatch{}
+		watched := map[string]int{}
+		// inotify queues IN_IGNORED after explicit removal. A descriptor may
+		// already have been reused when that old boundary is read. Discard old
+		// events through the boundary without deleting the new registration.
+		retired := map[int]int{}
 		initializing := true
 		push := func(event nativeWatchEvent) bool {
 			// Setup may encounter many unwatchable roots before the consumer
@@ -57,12 +65,41 @@ func watchNativePaths(parent context.Context, roots []string, excluded func(stri
 				return false
 			}
 		}
+		retireTree := func(path string, alreadyIgnored int) {
+			for wd, watch := range watches {
+				if !inside(path, watch.path) {
+					continue
+				}
+				delete(watches, wd)
+				if watched[watch.path] == wd {
+					delete(watched, watch.path)
+				}
+				if wd == alreadyIgnored {
+					continue
+				}
+				_, err := syscall.InotifyRmWatch(fd, uint32(wd))
+				if err == nil || errors.Is(err, syscall.EINVAL) {
+					// EINVAL means the kernel already removed this registered
+					// inode and its IN_IGNORED is still waiting in the queue.
+					retired[wd]++
+				} else {
+					push(nativeWatchEvent{Path: watch.path, Err: err})
+				}
+			}
+		}
 		add := func(path string) error {
 			if excluded(path) {
 				return nil
 			}
-			if watched[path] {
-				return nil
+			info, err := os.Stat(path)
+			if err != nil {
+				return err
+			}
+			if wd, ok := watched[path]; ok {
+				if os.SameFile(watches[wd].info, info) {
+					return nil
+				}
+				retireTree(path, -1)
 			}
 			if len(watches) >= 10000 {
 				return fmt.Errorf("native FIM exceeds 10000 directory watches")
@@ -71,14 +108,24 @@ func watchNativePaths(parent context.Context, roots []string, excluded func(stri
 			if err != nil {
 				return err
 			}
-			if previous, exists := watches[wd]; exists && previous != path {
-				delete(watched, previous)
+			if previous, exists := watches[wd]; exists && previous.path != path {
+				delete(watched, previous.path)
 			}
-			watches[wd] = path
-			watched[path] = true
+			watches[wd] = directoryWatch{path: path, info: info}
+			watched[path] = wd
 			return nil
 		}
 		refresh := func() {
+			// A moved-out ancestor leaves descendant watches attached to old
+			// inodes. Never attribute their future events to the original path.
+			for _, watch := range watches {
+				info, err := os.Stat(watch.path)
+				if os.IsNotExist(err) || err == nil && !os.SameFile(watch.info, info) {
+					retireTree(watch.path, -1)
+				} else if err != nil {
+					push(nativeWatchEvent{Path: watch.path, Err: err})
+				}
+			}
 			for _, root := range roots {
 				ancestor := filepath.Dir(root)
 				for {
@@ -133,6 +180,10 @@ func watchNativePaths(parent context.Context, roots []string, excluded func(stri
 			for {
 				n, err := syscall.Read(fd, buffer)
 				if errors.Is(err, syscall.EAGAIN) {
+					// Explicit removal queues its boundary before returning. If an
+					// overflow dropped one, an empty queue is also a safe boundary
+					// and must not leave a future reused descriptor suppressed.
+					clear(retired)
 					break
 				}
 				if err != nil {
@@ -160,17 +211,26 @@ func watchNativePaths(parent context.Context, roots []string, excluded func(stri
 						refreshNeeded = true
 						continue
 					}
-					parentPath, exists := watches[wd]
+					if retired[wd] > 0 {
+						if mask&syscall.IN_IGNORED != 0 {
+							retired[wd]--
+							if retired[wd] == 0 {
+								delete(retired, wd)
+							}
+						}
+						continue
+					}
+					parentWatch, exists := watches[wd]
 					if !exists {
 						continue
 					}
+					parentPath := parentWatch.path
 					path := parentPath
 					if name != "" {
 						path = filepath.Join(parentPath, name)
 					}
 					if mask&syscall.IN_IGNORED != 0 {
-						delete(watches, wd)
-						delete(watched, parentPath)
+						retireTree(parentPath, wd)
 						refreshNeeded = true
 						continue
 					}
@@ -188,9 +248,9 @@ func watchNativePaths(parent context.Context, roots []string, excluded func(stri
 						}
 					}
 					if mask&(syscall.IN_MOVE_SELF|syscall.IN_DELETE_SELF) != 0 {
-						delete(watches, wd)
-						delete(watched, parentPath)
-						_, _ = syscall.InotifyRmWatch(fd, uint32(wd))
+						retireTree(parentPath, -1)
+					} else if mask&syscall.IN_ISDIR != 0 && mask&(syscall.IN_MOVED_FROM|syscall.IN_DELETE) != 0 {
+						retireTree(path, -1)
 					}
 					if mask&(syscall.IN_CREATE|syscall.IN_MOVED_TO|syscall.IN_DELETE_SELF|syscall.IN_MOVE_SELF) != 0 {
 						refreshNeeded = true
