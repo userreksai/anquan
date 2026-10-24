@@ -262,6 +262,12 @@ func (m *Manager) Apply(ctx context.Context) (result []ComponentStatus, applyErr
 			equal, dirty[grubConfigPath] = false, true
 		}
 	}
+	// A directory's audit tree can disappear with its inode even when it is
+	// recreated before the next scan. Recheck the live rules on every cron
+	// reconciliation, including when the generated file has identical bytes.
+	if m.hasCronAuditWatches() {
+		equal, dirty[auditRulesPath] = false, true
+	}
 	if equal {
 		if err = m.validateFiles(ctx, desired); err != nil {
 			return m.failed("policies", err)
@@ -478,6 +484,9 @@ func (m *Manager) desiredFiles(ctx context.Context) (map[string]managedFile, []s
 		}
 		for _, p := range m.Config.Auditd.WatchPaths {
 			if _, err := os.Stat(m.path(p)); err != nil {
+				if IsCronPath(p) && os.IsNotExist(err) {
+					continue
+				}
 				return nil, nil, fmt.Errorf("audit watch %s: %w (create it or remove it from watch_paths)", p, err)
 			}
 			fmt.Fprintf(&b, "-w %s -p wa -k anquan_file\n", p)

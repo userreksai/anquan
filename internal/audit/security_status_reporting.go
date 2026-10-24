@@ -49,7 +49,20 @@ func componentStatusFingerprint(data map[string]any) (string, error) {
 		right, _ := projected[j]["name"].(string)
 		return left < right
 	})
-	raw, err = json.Marshal(map[string]any{"components": projected, "config_hash": data["config_hash"]})
+	// A changed local account list must reach the selected machine's editor on
+	// the next status check. Sampling time alone must not defeat deduplication.
+	var inventory struct {
+		SSHAccounts map[string]any `json:"ssh_accounts"`
+	}
+	inventoryJSON, err := json.Marshal(data["inventory"])
+	if err != nil {
+		return "", err
+	}
+	if err := json.Unmarshal(inventoryJSON, &inventory); err != nil {
+		return "", err
+	}
+	delete(inventory.SSHAccounts, "checked_at")
+	raw, err = json.Marshal(map[string]any{"components": projected, "config_hash": data["config_hash"], "ssh_accounts": inventory.SSHAccounts})
 	if err != nil {
 		return "", err
 	}

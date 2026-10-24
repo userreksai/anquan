@@ -308,7 +308,11 @@ func (m *Manager) Run(ctx context.Context, emit func(Event) error) error {
 			return nil
 		case <-status.C:
 			if err := m.reconcileEnforcedPolicies(ctx); err != nil && ctx.Err() == nil {
-				_ = emit(newEvent("policies", "reconcile_failed", "error", err.Error(), err.Error()+time.Now().UTC().Format("2006-01-02T15:04"), nil))
+				component := "policies"
+				if m.Config.Policies.Mode != "enforce" {
+					component = "auditd"
+				}
+				_ = emit(newEvent(component, "reconcile_failed", "error", err.Error(), err.Error()+time.Now().UTC().Format("2006-01-02T15:04"), nil))
 			}
 			if err := emit(m.statusEvent(ctx)); err != nil {
 				return fmt.Errorf("enqueue component status: %w", err)

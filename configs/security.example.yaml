@@ -49,6 +49,7 @@ security:
   max_queue_events: 10000
 
   # 自动使用系统包管理器安装 auditd，生成专用规则，不清空其他产品规则。
+  # 标准 cron 路径初始缺失时等待出现，不创建文件；后续按状态检查周期协调 audit 规则。
   # audit_exec 默认审计具有登录身份 auid 的外部程序执行，不覆盖所有Shell内建操作。
   auditd:
     enabled: true
@@ -62,9 +63,19 @@ security:
       - /etc/sudoers.d
       - /etc/crontab
       - /etc/cron.d
+      - /etc/cron.hourly
+      - /etc/cron.daily
+      - /etc/cron.weekly
+      - /etc/cron.monthly
+      - /etc/cron.allow
+      - /etc/cron.deny
+      - /var/spool/cron
+      - /etc/anacrontab
+      - /etc/cron.yearly
     rules: []
 
   # 原生SHA256/权限/属主/链接监控，基线跨重启保留；Linux有inotify实时通知。
+  # 初始不存在不告警，保留父目录观察；之后新增、修改、删除和重建均记录变更。
   native_fim:
     enabled: true
     paths:
@@ -76,6 +87,15 @@ security:
       - /etc/sudoers.d
       - /etc/crontab
       - /etc/cron.d
+      - /etc/cron.hourly
+      - /etc/cron.daily
+      - /etc/cron.weekly
+      - /etc/cron.monthly
+      - /etc/cron.allow
+      - /etc/cron.deny
+      - /var/spool/cron
+      - /etc/anacrontab
+      - /etc/cron.yearly
     poll_interval_seconds: 30
     capture_created_content: true  # 基线后新建文本及其后续版本，删除后仍可追溯；可显式关闭
     report_changes: false
@@ -120,7 +140,7 @@ security:
       enabled: false
       password_authentication: "no"
       permit_root_login: prohibit-password
-      allow_users: []
+      allow_users: []          # 空名单不限制账户；可在页面选择机器后从上报的本地账户中选择
       allow_sources: []
       disable_forwarding: false
       strong_crypto: false

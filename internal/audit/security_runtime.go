@@ -87,6 +87,7 @@ func securityDataDir(c Config) string {
 
 func securityInventory() map[string]any {
 	result := map[string]any{"os": runtime.GOOS, "architecture": runtime.GOARCH, "cpu_count": runtime.NumCPU()}
+	result["ssh_accounts"] = hostSSHAccounts()
 	if b, err := os.ReadFile("/proc/sys/kernel/osrelease"); err == nil {
 		result["kernel"] = strings.TrimSpace(string(b))
 	}
@@ -155,7 +156,6 @@ func securityLoop(ctx context.Context, c Config, writer io.Writer) {
 	if sshEnabled {
 		sshState = "starting"
 	}
-	inventory := securityInventory()
 	fimEnabled := c.Security != nil && c.Security.Enabled && c.Security.NativeFIM != nil && c.Security.NativeFIM.Enabled
 	if fimEnabled {
 		fimState = "starting"
@@ -192,7 +192,9 @@ func securityLoop(ctx context.Context, c Config, writer io.Writer) {
 			}
 			healthMu.Unlock()
 			event.Data["queue"] = q.stats()
-			event.Data["inventory"] = inventory
+			// Account additions/removals must be discovered while the service is
+			// running, rather than being frozen at worker startup.
+			event.Data["inventory"] = securityInventory()
 			boundSecurityStatus(event.Data, components)
 			return statusReporter.emit(event, persist)
 		}
