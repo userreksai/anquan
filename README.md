@@ -1,4 +1,6 @@
-# Anqu 安全检测 Agent（v0.7.7）
+# Anqu 安全检测 Agent（v0.7.8）
+
+v0.7.8 为编译时指定 Master IP、可选 cron 路径生命周期监控及本机 SSH 账户发现分配正式升级版本。标准 cron 路径初始缺失时不创建、不告警，后续出现自动纳入，删除与重建继续监控。账户清单随现有组件状态上报，供平台按机器选择 SSH 登录白名单。已安装 0.7.7 的节点需重新构建并打包 0.7.8 后升级；源码版本、实际程序 `-version` 和 `.update.json` 必须一致，不允许用同版本不同 SHA256 绕过升级检查。编译 Master IP、默认回退和配置 TCP / 上报 UDP 分离逻辑保持不变。
 
 v0.7.7 为已合并的主机加固和命令记录格式兼容修正分配独立发布版本，支持 `sudo.restrict_users`、SSH `disable_forwarding` / `strong_crypto` 和 GRUB `protect_single_user`。旧版 0.7.6 会拒绝这些新字段，统一显示 `master configuration contains invalid YAML`；先将节点升级至 0.7.7，再下发包含新字段的配置。构建程序与 `.update.json` 清单使用同一源码版本，平台可按严格递增版本将旧 0.7.6 升级到 0.7.7。主机策略仍默认仅检查（`audit`），需要实际修改时须显式选择 `enforce`。
 
