@@ -153,7 +153,7 @@ func (d *ConfigDelivery) parseAssigned(ciphertext []byte) (Config, error) {
 	cfg.masters, cfg.identity, cfg.downloadRelay = d.bootstrap.masters, d.bootstrap.identity, d.bootstrap.downloadRelay
 	cfg, err = normalizeConfig(cfg, d.baseDir, nativePathRules())
 	if err != nil {
-		return Config{}, errors.New("master configuration validation failed")
+		return Config{}, fmt.Errorf("master configuration validation failed: %w", err)
 	}
 	return cfg, nil
 }
